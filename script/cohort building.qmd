@@ -12,28 +12,10 @@ The goal of this analysis is to explore DDI in CVD using the SCCS as a high-thro
 # Packages
 
 ```{r}
-#| label: Packages/Functions
-#| echo: false
+#| label: load-packages/functions
+#| include: false
 
-library(tidyverse)
-library(arrow)
-library(duckdb)
-library(tictoc)
-library(haven)
-library(reshape2)
-library(lubridate)
-library(SCCS)
-library(janitor)
-library(pubh)
-library(fs)
-library(here)
-library(AdhereR)
-library(remotes)
-library(lme4)
-library(gnm)
-library(survival)
-library(grid)
-library(forestploter)
+pacman::p_load(tidyverse, arrow, duckdb, tictoc, haven, reshape2, lubridate, SCCS, janitor, fs, here, AdhereR, remotes, lme4, gnm, survival, grid, forestploter, duckplyr, xlsx, data.table, progress)
 
 # Call functions
 source(here("codes/functions.R"))
@@ -65,7 +47,6 @@ source(here("codes/functions.R"))
 # #Precipitant grace period
 # precip_grace <- 1
 
-
 ```
 
 # Data
@@ -74,75 +55,337 @@ source(here("codes/functions.R"))
 
 ```{r}
 #| label: Inpatient Data
-#| echo: false
 
 #Need to merge with inpatient services (S) to get revenue code
-redbook <- arrow::read_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/statins-ddi/data/redbook.parquet")
-ccaei_2010_2011 <- open_dataset("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/CCAEi")
-mdcri_2010_2011 <- open_dataset("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/MDCRi") 
-ccaes_2010_2011 <- open_dataset("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/CCAEs")
-mdcri_2010_2011 <- open_dataset("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/MDCRs") 
+redbook <- arrow::read_parquet("//pharm-psop/Truven Data/Truven Data R/redbook.parquet")
 
+# #Apixaban NDC codes
+# apixaban_ndc <- redbook |> 
+#   filter(NDCNUM %in% c("82982005430", "82804008530", "71610081183", "71610066280", "71610066218", "71610066209", "70518186100", "63629843202", "63629843201", "63629774704", "63629774703", "63629774702", "63629774701", "55154061308", "55154061300", "55154061208", "55154061200", "50090645400", "50090645100", "50090143700", "00003376474", "00003089491", "00003089470", "00003089431", "00003089421", "00003089391", "00003089331", "00003089321", "14445015060", "14445015018", "14445015010", "14445015005", "14445014960", "14445014918", "14445014914", "14445014905", "14445014910")) 
+# 
+# apixaban_ndc <- apixaban_ndc$NDCNUM
+# 
+# 
+# rivaroxaban_ndc <- redbook |> 
+#   filter(NDCNUM %in% c("50090362500", "50090362501", "50090446900", "50458057501", "50458057710", "50458057714", "50458057718", "50458057760", "50458057807", "50458057810", "50458057830", "50458057890", "50458057907", "50458057910", "50458057930", "50458057989", "50458057990", "50458058007", "50458058010", "50458058030", "50458058090", "50458058451", "50458058452", "55154142200", "55154142308", "55154142408", "71610069042"))
+# 
+# rivaroxaban_ndc <- rivaroxaban_ndc$NDCNUM
+# 
+# dabigatran_ndc <- redbook |> 
+#   filter(NDCNUM %in% c("72205020260", "72205020460", "31722062160", "31722062260", "60505434702", "60505434706", "60505434806", "60505434906", "60687074421", "60687075232", "62332063406", "62332063460", "62332063606", "62332063660", "67877047460", "67877047560", "72865027260", "72865027360", "00597042578", "00597043018", "00597043596", "00597044053", "00597044587", "00597045016", "00597010854", "00597010860", "00597035509", "00597035556", "00597036055", "00597036082", "50090448000", "63629824201"))
+# 
+# dabigatran_ndc <- dabigatran_ndc$NDCNUM
+# 
+# #Better to use GENNME in case redbook has some uncaptured here all FDA identified NDC have correct GENNME. 
 
-#Diagnosis code required to be the principal discharge diagnosis with either 1) a diagnosis code indicating bleeding as a secondary diagnosis or 2) a revenue code indicating a transfusion
-#First load ccaes dataset. Can have multiple revenue codes so need to create array or convert to wide. 
-#Should be able to only pull out the REVCODES for transfusion
+mdcri_2009_2021 <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/i") 
+mdcrs_2009_2021 <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/s")
+```
 
-ccaes_2010_2011_bleed <- ccaes_2010_2011 |> 
+# Identify patients who have the outcome of interest
+```{r}
+#Collect enrolid for patients with hosp for bleed from 2009-2021 (criteria outlined by Leonard et al)
+
+#Filter and collect ccaes cases with transfusion REVCODE 
+ccaes_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/ccae/s") |> 
   select(c(ENROLID, YEAR, ADMDATE, DISDATE, REVCODE)) |> 
   to_duckdb() |> 
-  filter(REVCODE %in% c("0390", "0391")) |> 
-  filter(!is.na(ENROLID)) |> 
+  filter(REVCODE %in% c("0390", "0391") & !is.na(ENROLID)) |> 
   distinct(ENROLID, .keep_all = TRUE) |> 
-  collect()  
-  
-ccaei_2010_2011_bleed <- ccaei_2010_2011 |> #5656412 obs
-  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, PDX, DX1:DX15)) |> 
+  collect() #1304548 obs
+
+#Collect the inpatient (time: 9 minutes for full)
+ccaei_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/ccae/i", unify_schemas = TRUE) |> #24224052 obs
+  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, DXVER, PDX, DX1:DX15, PROC1:PROC15)) |> 
   to_duckdb() |> 
-  collect()
+  collect() 
 
 #Merge ccaei with ccaes to get REVCODE
-test <- ccaei_2010_2011_bleed |> 
-  left_join(ccaes_2010_2011_bleed, by = c("ENROLID", "YEAR", "ADMDATE", "DISDATE")) |> 
-  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, PDX, DX1:DX15, REVCODE)) |> 
-  collect()
+ccaei_2009_2021_bleed_merge <- ccaei_2009_2021_bleed |> 
+  left_join(ccaes_2009_2021_bleed, by = c("ENROLID", "YEAR", "ADMDATE", "DISDATE")) |> 
+  filter(!is.na(ENROLID)) |>
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER))
 
-#Need to add in OR statement for ReVcode then figure out how to make more concise and in one AND/OR statement. 
+#Identify IDs with event in ccae using criteria outlined by Leonard et al (time: 14 min)
+ccae_bleed_outcome_2009_2021 <- ccaei_2009_2021_bleed_merge |> #24168165 obs
+  #filter(YEAR == 2021) |>  #test to make sure working on small dataset
+  #filter(ENROLID == 4082398001) |> 
+  mutate(
+    bleed_code = if_else(
+      is.na(DXVER) | DXVER == 9, #think can remove is.na(DXVER but not checking now)
+      if_any(PDX, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+        (if_any(PDX, ~str_detect(.x, {{all_gib_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+            !is.na(REVCODE))) | 
+      (if_any(PDX, ~str_detect(.x, {{all_unspec_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})))) |
+      (if_any(PDX, ~ gu_icd9_possible %in% .x)  &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}}))) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_comb_sec}})))),
+      if_else(
+        DXVER == 0, 
+        if_any(PDX, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+          (if_any(PDX, ~str_detect(.x, {{all_gib_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+                !is.na(REVCODE))) | 
+          (if_any(PDX, ~str_detect(.x, {{all_unspec_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})))),
+        NA
+      )
+    )
+  ) |>
+  group_by(ENROLID) |> 
+  mutate(bleed_ever = as.integer(any(bleed_code))) |> 
+  filter(bleed_ever == 1) |> #797760 - now 796266 - maybe old ICD codes were errant?
+  ungroup() #We have to keep this in because it pulls in people who have had a bleed event, but also all other inpt admissions. Can filter by bleed_code later
 
-#Identify IDs with event in ccae
-ccaei_2010_2011_bleed <- ccaei_2010_2011 |> #5656412 obs
-  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, PDX, DX1:DX15)) |> 
+
+ccae_bleed_outcome2 <- ccae_bleed_outcome_2009_2021 |> 
+  mutate(
+    trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  ) #796266
+
+inpatient_trauma <- ccae_bleed_outcome2 |> 
+  select(ENROLID, ADMDATE, DXVER, trauma_code) |> 
+  filter(trauma_code == TRUE) |> 
+  mutate(source = "inpatient")
+
+
+#Above collects patients who had an inpatient bleed event. Need to pull them into outpatient dataset to search for trauma
+outcome_enrolid <- unique(ccae_bleed_outcome_2009_2021$ENROLID)
+
+ccaeo_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/ccae/o", unify_schemas = TRUE) |> 
+  select(ENROLID, SVCDATE, DXVER, DX1, DX2, DX3, DX4, PROC1) |> 
   to_duckdb() |> 
-  mutate(x = if_any(PDX, ~str_detect(.x, {{all_icd9_bleeds_ind}}))) |> 
-  filter(across(everything(), ~ !is.na(ENROLID) & x == TRUE)) |> #57,763 obs
-  mutate(x = if_any(PDX, ~str_detect(.x, {{all_icd9_bleeds_possible}})) & if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}}))) |> 
-  filter(across(everything(), ~ !is.na(ENROLID) & x == TRUE)) |> #38565 obs
-  collect()
+  filter(ENROLID %in% outcome_enrolid) |> 
+  collect() #96698718 obs
 
-#Do ind OR possible and within possible need OR statement
-  
-#Repeat in mdcr
-mdcri_2010_2011_thromboembolism <- mdcri_2010_2011 |> 
-  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, DX1:DX15)) |> 
+ccaeo_2009_2021_bleed2 <- ccaeo_2009_2021_bleed |> 
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER)) |> 
+  mutate(trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX4, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX4, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  )
+
+# Outpatient trauma codes
+outpatient_trauma <- ccaeo_2009_2021_bleed2 |> 
+  select(ENROLID, SVCDATE, DXVER, trauma_code) |> 
+  filter(trauma_code == TRUE) |> 
+  mutate(ADMDATE = SVCDATE, source = "outpatient") |> 
+  select(-SVCDATE)
+
+# Combine trauma codes
+all_trauma_codes <- bind_rows(inpatient_trauma, outpatient_trauma) |> 
+  distinct() |> 
+  arrange(ENROLID, ADMDATE)
+
+
+#Join trauma codes with main dataset
+ccae_bleed_outcome_merged <- ccae_bleed_outcome_2009_2021 |> 
+  left_join(all_trauma_codes, by = "ENROLID") |> 
+   mutate(
+    within_window = (ADMDATE.x - 1 <= ADMDATE.y & ADMDATE.y <= ADMDATE.x + 1)
+  ) |> 
+  filter(within_window) |> 
+  distinct(ENROLID, ADMDATE.x) |> 
+  mutate(exclusion_event = 1)
+
+ccae_bleed_outcome_no_trauma <- ccae_bleed_outcome_2009_2021 |> 
+  left_join(ccae_bleed_outcome_merged, by = c("ENROLID", "ADMDATE" = "ADMDATE.x")) |> 
+  filter(bleed_code == TRUE) |> 
+  filter(is.na(exclusion_event)) #38587
+
+
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+ccae_bleed_outcome_no_trauma |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+
+#Open dataset
+ccae_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+
+
+##MDCR - 8 min to run entire mdcr inpt
+#Filter and collect ccaes cases with transfusion REVCODE 
+mdcrs_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/s") |> 
+  select(c(ENROLID, YEAR, ADMDATE, DISDATE, REVCODE)) |> 
   to_duckdb() |> 
-  mutate(x = if_any(DX1:DX15, ~str_detect(.x, {{traum_brain_inj_pattern}}))) |> 
-  filter(across(everything(), ~ !is.na(ENROLID) & x == FALSE)) |>  
-  mutate(x = if_any(DX1:DX15, ~str_detect(.x, {{stroke_pattern}}))) |> 
-  filter(across(everything(), ~ !is.na(ENROLID) & x == TRUE)) |> #208862 obs rem
-  mutate(data_event = "mdcri") |> 
-  collect()
+  filter(REVCODE %in% c("0390", "0391") & !is.na(ENROLID)) |> 
+  distinct(ENROLID, .keep_all = TRUE) |> 
+  collect() #1304548 obs
+
+#Collect the inpatient (time: 9 minutes for full)
+mdcri_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/i", unify_schemas = TRUE) |> #24224052 obs
+  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, DXVER, PDX, DX1:DX15, PROC1:PROC15)) |> 
+  to_duckdb() |> 
+  collect() 
+
+#Merge mdcri with mdcrs to get REVCODE
+mdcri_2009_2021_bleed_merge <- mdcri_2009_2021_bleed |> 
+  left_join(mdcrs_2009_2021_bleed, by = c("ENROLID", "YEAR", "ADMDATE", "DISDATE")) |> 
+  filter(!is.na(ENROLID)) |>
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER))
+
+#Identify IDs with event in mdcr using criteria outlined by Leonard et al (time: 14 min)
+mdcr_bleed_outcome_2009_2021 <- mdcri_2009_2021_bleed_merge |> #24168165 obs
+  #filter(YEAR == 2021) |>  #test to make sure working on small dataset
+  #filter(ENROLID == 4082398001) |> 
+  mutate(
+    bleed_code = if_else(
+      is.na(DXVER) | DXVER == 9, #think can remove is.na(DXVER but not checking now)
+      if_any(PDX, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+        (if_any(PDX, ~str_detect(.x, {{all_gib_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+            !is.na(REVCODE))) | 
+      (if_any(PDX, ~str_detect(.x, {{all_unspec_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})))) |
+      (if_any(PDX, ~ gu_icd9_possible %in% .x)  &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}}))) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_comb_sec}})))),
+      if_else(
+        DXVER == 0, 
+        if_any(PDX, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+          (if_any(PDX, ~str_detect(.x, {{all_gib_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+                !is.na(REVCODE))) | 
+          (if_any(PDX, ~str_detect(.x, {{all_unspec_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})))),
+        NA
+      )
+    )
+  ) |>
+  group_by(ENROLID) |> 
+  mutate(bleed_ever = as.integer(any(bleed_code))) |> 
+  filter(bleed_ever == 1) |> #797760 - now 796266 - maybe old ICD codes were errant?
+  ungroup() #We have to keep this in because it pulls in people who have had a bleed event, but also all other inpt admissions. Can filter by bleed_code later
+
+
+mdcr_bleed_outcome2 <- mdcr_bleed_outcome_2009_2021 |> 
+  mutate(
+    trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  ) #796266
+
+mdcr_inpatient_trauma <- mdcr_bleed_outcome2 |> 
+  select(ENROLID, ADMDATE, DXVER, trauma_code) |> 
+  filter(trauma_code == TRUE) |> 
+  mutate(source = "inpatient")
+
+
+#Above collects patients who had an inpatient bleed event. Need to pull them into outpatient dataset to search for trauma
+outcome_enrolid <- unique(mdcr_bleed_outcome_2009_2021$ENROLID)
+
+mdcro_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/o", unify_schemas = TRUE) |> 
+  select(ENROLID, SVCDATE, DXVER, DX1, DX2, DX3, DX4, PROC1) |> 
+  to_duckdb() |> 
+  filter(ENROLID %in% outcome_enrolid) |> 
+  collect() #96698718 obs
+
+mdcro_2009_2021_bleed2 <- mdcro_2009_2021_bleed |> 
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER)) |> 
+  mutate(trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX4, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX4, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  )
+
+# Outpatient trauma codes
+mdcr_outpatient_trauma <- mdcro_2009_2021_bleed2 |> 
+  select(ENROLID, SVCDATE, DXVER, trauma_code) |> 
+  filter(trauma_code == TRUE) |> 
+  mutate(ADMDATE = SVCDATE, source = "outpatient") |> 
+  select(-SVCDATE)
+
+# Combine trauma codes
+mdcr_all_trauma_codes <- bind_rows(mdcr_inpatient_trauma, mdcr_outpatient_trauma) |> 
+  distinct() |> 
+  arrange(ENROLID, ADMDATE)
+
+
+#Join trauma codes with main dataset
+mdcr_bleed_outcome_merged <- mdcr_bleed_outcome_2009_2021 |> 
+  left_join(mdcr_all_trauma_codes, by = "ENROLID") |> 
+   mutate(
+    within_window = (ADMDATE.x - 1 <= ADMDATE.y & ADMDATE.y <= ADMDATE.x + 1)
+  ) |> 
+  filter(within_window) |> 
+  distinct(ENROLID, ADMDATE.x) |> 
+  mutate(exclusion_event = 1)
+
+mdcr_bleed_outcome_no_trauma <- mdcr_bleed_outcome_2009_2021 |> 
+  left_join(mdcr_bleed_outcome_merged, by = c("ENROLID", "ADMDATE" = "ADMDATE.x")) |> 
+  filter(bleed_code == TRUE) |> 
+  filter(is.na(exclusion_event)) #38587
+
+
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+mdcr_bleed_outcome_no_trauma |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+
+#Open dataset
+mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
 
 #Merge inpatient files
-all_outcome <- bind_rows(ccaei_2010_2011_thromboembolism, mdcri_2010_2011_thromboembolism) |> 
+all_outcome <- bind_rows(ccae_bleed_outcome_no_trauma, mdcr_bleed_outcome_no_trauma) |> 
   arrange(ENROLID, ADMDATE) |> 
   group_by(ENROLID) |> 
   mutate(hospnum = row_number()) |> 
   ungroup() |> 
-  mutate(eventnum= row_number()) |>
-  select(c(ENROLID, ADMDATE, DAYS, DISDATE, hospnum, eventnum)) #438578 obs
+  mutate(eventnum= row_number()) |> 
+  select(c(ENROLID, ADMDATE, DAYS, DISDATE, hospnum, eventnum)) #1297106 obs; 1579503 post adjustment; 570608 post second adjustment
 
-#Create vector that includes ENROLID of all individuals who experienced outcome in 2009-2019
-outcome_vec <- all_outcome$ENROLID
+
+all_outcome |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+
+all_inpatient_bleed_no_trauma <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+
+#Create vector that includes ENROLID of all individuals who experienced outcome in 2009-2021
+outcome_vec <- all_inpatient_bleed_no_trauma$ENROLID #1297106
+
+#Shouldn't this be distinct obs? 
+all_outcome2 <- all_inpatient_bleed_no_trauma |> 
+  distinct(ENROLID)
+
+outcome_vec <- all_outcome2$ENROLID #414293 old; 499926 - pretty decent jump actually; 497398 after adding outpt trauma
 
 ```
 
@@ -152,30 +395,55 @@ outcome_vec <- all_outcome$ENROLID
 #| label: Drug Data
 #| echo: false
 
+
 #Create cohort of patients who had event in either ccae or mdcr and also filled a statin.
-ccaed_2010_2011 <- open_dataset(("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/CCAEd")) |> 
+ccaed_2009_2021 <- open_dataset(("//pharm-psop/Truven Data/Truven Data R/ccae/d")) |> 
   to_duckdb() |> 
-  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, DAYSUPP))|>
+  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP))|>
   filter(ENROLID %in% outcome_vec) |> 
   distinct() |> 
   collect() |> 
   left_join(redbook, by = "NDCNUM") |>  
   mutate(dataset = "ccae") |> 
-  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, DAYSUPP, THRDTDS, GENNME, MASTFRM, dataset))   #8381431  observations 
+  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP, THRDTDS, GENNME, MASTFRM, dataset))   #32087676 observations 
+
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+ccaed_2009_2021 |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021.parquet")
+
+#Open dataset
+ccaed_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021.parquet")
   
 #Repeat for MDCR Cohort & merge with ccaed
-mdcrd_2010_2011 <- open_dataset(("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/MDCRd")) |> 
+mdcrd_2009_2021 <- open_dataset(("//pharm-psop/Truven Data/Truven Data R/mdcr/d")) |> 
   to_duckdb() |> 
-  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, DAYSUPP))|>
+  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP))|>
   filter(ENROLID %in% outcome_vec) |> 
   distinct() |> 
   collect () |> 
   left_join(redbook, by = "NDCNUM") |> 
   mutate(dataset = "mdcr") |> 
-  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, DAYSUPP, THRDTDS, GENNME, MASTFRM, dataset)) #25318176
+  select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP, THRDTDS, GENNME, MASTFRM, dataset)) #45251032
 
-#Merge drug files
-all_drug <- full_join(ccaed_2010_2011, mdcrd_2010_2011) #33699607 observations
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+mdcrd_2009_2021 |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021.parquet")
+
+#Open dataset
+mdcrd_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021.parquet")
+  
+
+
+#Bind drug files
+all_drug <- rbind(ccaed_2009_2021, mdcrd_2009_2021) #77338708
+
+
+
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+all_drug |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+
+#Open dataset
+all_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+
+
 
 ```
 
@@ -184,21 +452,138 @@ all_drug <- full_join(ccaed_2010_2011, mdcrd_2010_2011) #33699607 observations
 ## Object Index
 
 ```{r}
-##Flag Object (warfarin) and assign index date
-obj1 <- all_drug |> 
+##Flag Object drugs and assign index date
+obj1 <- all_drug_2009_2021 |> 
   arrange(ENROLID, SVCDATE) |>
-  filter(!is.na(AGE)) |> #59,641,295 obs
-  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object_test, collapse = "|")))) |> 
-  filter(doac ==TRUE) |> #2,561,030 obs
+  filter(!is.na(AGE)) |> #77,338,708
+  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object, collapse = "|")))) |> 
+  filter(doac ==TRUE) |> #509,561
+  #filter(DAYSUPP>0) |> #478,301 filters out potentially errant fills - re-review with below?
   group_by(ENROLID) |> 
-  mutate(indexdt=min(SVCDATE)) |> 
-  filter(indexdt >= new_user_req) |> #1,552,900
-  ungroup()
+  mutate(index_date = min(SVCDATE)) |> 
+  filter(index_date >= new_user_req) |> #509561 (made 1 year pre-index req - no change bc DOAC first appr 2010)
+  ungroup() |> 
+  mutate(GENNME = if_else(GENNME == "Rivaroxaban;Rivaroxaban", "Rivaroxaban", GENNME)) |> #Creates uniform naming
+  mutate(index_med = if_else(index_date == SVCDATE, GENNME, NA)) |> #create var for index med
+  group_by(ENROLID) |> 
+  fill(index_med, .direction = "down") |> #fill down for rest of obs
+  ungroup() |> 
+  mutate(doac_switch = if_else(GENNME == index_med, "match", "switch")) 
+
+##Lots of fills with DS #1 can use NDC to understand package size
+#Should use web to identify NDC or FDA website and then search within redbook - no difference
+#Maybe wait till have cohort and look at oddities before cutting out
+
+# obj1 |> 
+#   filter(GENNME == "Apixaban") |> 
+#   group_by(DAYSUPP) |> 
+#   count(DAYSUPP)
+
+#create marker for DOAC switch
+# Assuming test is your dataset
+# Convert SVCDATE to Date type if it is not already
+
+
+# Create a flag column for claims with negative days' supply
+test <- obj1 %>%
+  mutate(negative_days_flag = ifelse(DAYSUPP < 0, TRUE, FALSE),
+         cancel_flag = FALSE,
+         days_to_closest_positive_claim = NA)
+
+test |> 
+  filter(ENROLID == 316703)
+
+# Identify pairs of positive and negative claims
+for (i in 1:nrow(test)) {
+  if (test$negative_days_flag[i]) {
+    # Get the current enrollee ID and service date for the negative claim
+    enrolid <- test$ENROLID[i]
+    svcdate <- test$SVCDATE[i]
+    daysupp_negative <- test$DAYSUPP[i]
+    
+    # Check for positive claims on the same day or within 15 days prior
+    positive_claims_15 <- test %>%
+      filter(ENROLID == enrolid,
+             SVCDATE <= svcdate,
+             SVCDATE >= (svcdate - days(15)),
+             DAYSUPP > 0)
+    
+    # Check for exact match positive claims within 45 days prior
+    exact_match_45 <- test %>%
+      filter(ENROLID == enrolid,
+             SVCDATE <= svcdate,
+             SVCDATE >= (svcdate - days(60)),
+             DAYSUPP == abs(daysupp_negative))
+    
+    # If there are positive claims within 15 days, find the closest one
+    if (nrow(positive_claims_15) > 0) {
+      closest_positive_claim <- positive_claims_15 %>%
+        arrange(desc(SVCDATE)) %>%
+        slice(1)
+      
+      days_diff <- as.numeric(difftime(svcdate, closest_positive_claim$SVCDATE, units = "days"))
+      test$days_to_closest_positive_claim[i] <- days_diff
+      
+      # Set the cancel flag for both the negative and positive claims
+      test$cancel_flag[i] <- TRUE
+      test$cancel_flag[which(test$ENROLID == enrolid & 
+                             test$SVCDATE == closest_positive_claim$SVCDATE & 
+                             test$DAYSUPP == closest_positive_claim$DAYSUPP)] <- TRUE
+    }
+    
+    # If there are exact match positive claims within 45 days, find the closest one
+    if (nrow(exact_match_45) > 0) {
+      closest_positive_claim <- exact_match_45 %>%
+        arrange(desc(SVCDATE)) %>%
+        slice(1)
+      
+      # Set the cancel flag for both the negative and positive claims
+      test$cancel_flag[i] <- TRUE
+      test$cancel_flag[which(test$ENROLID == enrolid & 
+                             test$SVCDATE == closest_positive_claim$SVCDATE & 
+                             test$DAYSUPP == closest_positive_claim$DAYSUPP)] <- TRUE
+    }
+  }
+}
+
+# Remove cancelled claims
+test_uncancelled <- test %>%
+  filter(!cancel_flag & !negative_days_flag)
+
+# df_no_match <- test %>%
+#   filter(negative_days_flag & !cancel_flag)
+
+#Select max value if multiple fills on same day. 
+
+test_multfill <- test_uncancelled %>%
+  group_by(ENROLID, SVCDATE) %>%
+  mutate(fill_count = n()) %>%
+  ungroup() %>%
+  mutate(multiple_fills_flag = ifelse(fill_count > 1, TRUE, FALSE)) %>%
+  filter(!(multiple_fills_flag & DAYSUPP != max(DAYSUPP, na.rm = TRUE))) %>%
+  select(-fill_count, -multiple_fills_flag)
+  
+test_min_index <- test_multfill%>%
+  arrange(ENROLID, SVCDATE, DAYSUPP) |> 
+  group_by(ENROLID) %>%
+  mutate(first_fill_date = min(SVCDATE)) %>%
+  ungroup() |> 
+  mutate(init_ds_low = if_else(SVCDATE == first_fill_date & DAYSUPP <7, "remove", NA)) |> 
+  group_by(ENROLID) |> 
+  fill(init_ds_low, .direction = "down") |> 
+  ungroup() |> 
+  filter(is.na(init_ds_low))
+
+testy <- test_min_index |> 
+ group_by(ENROLID) |>
+  mutate(first_switch_date = min(SVCDATE[doac_switch == "switch"], na.rm = TRUE)) |>
+  ungroup() |>
+  filter(is.na(first_switch_date) | SVCDATE < first_switch_date)
+
 
 ##Apply continuous exposure rules
-obj2 <- obj1 |> 
-  filter(DAYSUPP>0) |> #97132 obs
-  mutate(obj_fill_end=SVCDATE+DAYSUPP+obj_grace) |>  #14d grace (Bykov)
+obj2 <- testy |> 
+  mutate(obj_fill_end = SVCDATE + DAYSUPP + (DAYSUPP *0.2)) |>  #7d grace (Zhou 2020); modifying to 80* DS
   group_by(ENROLID) |> 
   mutate(obj_end_lagged = lag(obj_fill_end)) |> 
   ungroup() |> 
@@ -211,120 +596,71 @@ obj2 <- obj1 |>
   group_by(ENROLID) |> 
   fill(censor)  |>  #Fills down the censored variables for filtering; 243201
   ungroup() |> 
-  filter(is.na(censor)) #49254 obs
+  filter(is.na(censor)) #148709
 
-##Create cohort of statin users
+##Create cohort of doac users
 obj3 <- obj2 |> 
   group_by(ENROLID) |> 
   mutate(obj_period_end = max(obj_fill_end)) |> 
   ungroup() |> 
-  select(ENROLID, AGE, indexdt, dataset, obj_period_end) |> 
-  distinct(ENROLID, .keep_all = TRUE) #101,556 unique users
+  select(ENROLID, GENNME, AGE, SEX, index_date, obj_period_end) |> 
+  distinct(ENROLID, .keep_all = TRUE) #41993
 
-##Write parquet file of distinct IDs (age 18+ at index) for continuous enrollment assessment. XXX,XXX before cont_enroll_req (total).
-obj3 |>
-  distinct(ENROLID, .keep_all = TRUE) |> 
-  filter(AGE>=18) |>  #101,904
-  select(ENROLID, indexdt, dataset) |>
-  filter(dataset=="ccae") |> #61,205
-  write_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_ccae.parquet")
-  
-obj3 |>
-  distinct(ENROLID, .keep_all = TRUE) |> 
-  filter(AGE>=18) |> 
-  select(ENROLID, indexdt, dataset) |>
-  filter(dataset=="mdcr") |> #40,699
-  write_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_mdcr.parquet")
+obj3 |> 
+ mutate(test = obj_period_end - index_date) |> 
+  arrange(desc(test))
+
+#Open dataset
+all_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+
+
 
 ```
 
 ## Continuous enrollment
 
-### CCAE
 
 ```{r}
-#No need to re-run file prior to CE. Need to check dependencies
-ids_with_indexdate <- read_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_ccae.parquet")
-ccaea <- open_dataset("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/CCAEa")
-ccaea |> 
-  summarise(max(AGE)) |> 
-  to_duckdb()
-# Extract enrollment data for our cohort
-ids_with_indexdate_enrollment_data <- ccaea |> 
-  select(ENROLID, contains("MEMDAY"), YEAR) |> 
-  filter(ENROLID %in% ids_with_indexdate$ENROLID) |> 
+#Write parquet file for patients 18+ iwth index date and ENROLID for CE assessment
+obj3 |>
+  filter(AGE>=18) |>  #41975
+  select(ENROLID, index_date) |> 
+  select(ENROLID, index_date) |> 
+  write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+
+#Open dataset
+cohort_ids_for_CE <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+
+cont_enrollment_ids <- cohort_ids_for_CE$ENROLID
+
+#Open relevant T files for CE scanning
+ccae_enrol <- open_dataset("//pharm-psop/Truven Data/Truven Data R/ccae/t") |> 
+  select(ENROLID, DTSTART, DTEND) |> 
+  to_duckdb() |> 
+  filter(ENROLID %in% cont_enrollment_ids) |> 
   collect()
 
-ids_with_indexdate_enrollment_data2 <- ids_with_indexdate_enrollment_data |> 
-  left_join(ids_with_indexdate) |> 
-  rename(index_date = indexdt)
+mdcr_enrol <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/t") |> 
+  select(ENROLID, DTSTART, DTEND) |> 
+  to_duckdb() |> 
+  filter(ENROLID %in% cont_enrollment_ids) |> 
+  collect()
 
-ids_with_indexdate_cont_enroll <-  
-  GetContinuousEnrollmentCohort2(data = ids_with_indexdate_enrollment_data2,
-                               days_before = cont_enroll_req,
-                               days_after = 0,
-                               max_allowed_days_gap = 0) |> 
-  select(ENROLID, index_date)
+all_enrol <- rbind(ccae_enrol, mdcr_enrol) 
 
-# Test it 
-ids_with_indexdate_enrollment_data2 |> 
-  anti_join(ids_with_indexdate_cont_enroll) |> 
-  filter(ENROLID == 26948666501)
+#Set look-back
+months_prior <- 12
+continuous_enrollment <- evaluate_continuous_enrollment(all_enrol, cohort_ids_for_CE, months_prior)
 
-# Save the continuously enrolled IDs
-ids_with_indexdate_cont_enroll |> 
-  write_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_cont_enroll_ccae.parquet")
-
-read_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_cont_enroll_ccae.parquet")
+ids_with_indexdate_ce <- continuous_enrollment |> 
+  filter(is_continuously_enrolled == TRUE)
 
 #Create vector of ENROLID meeting criteria
-ids_with_ce_ccae <- ids_with_indexdate_cont_enroll$ENROLID #45,751
-
+ids_with_ce <- ids_with_indexdate_ce$ENROLID #36842
 
 
 ```
 
-### MDCR
-
-```{r}
-ids_with_indexdate <- read_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_mdcr.parquet")
-mdcra <- open_dataset("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/MDCRa")
-
-# Extract enrollment data for our cohort
-ids_with_indexdate_enrollment_data <- mdcra |> 
-  select(ENROLID, contains("MEMDAY"), YEAR) |> 
-  filter(ENROLID %in% ids_with_indexdate$ENROLID) |> 
-  collect()
-
-ids_with_indexdate_enrollment_data2 <- ids_with_indexdate_enrollment_data |> 
-  left_join(ids_with_indexdate) |> 
-  rename(index_date = indexdt)
-
-ids_with_indexdate_cont_enroll <-  
-  GetContinuousEnrollmentCohort2(data = ids_with_indexdate_enrollment_data2,
-                               days_before = cont_enroll_req,
-                               days_after = 0,
-                               max_allowed_days_gap = 0) |> 
-  select(ENROLID, index_date)
-
-# Test it 
-ids_with_indexdate_enrollment_data2 |> 
-  anti_join(ids_with_indexdate_cont_enroll) |> 
-  filter(ENROLID == 26948666501)
-
-# Save the continuously enrolled IDs
-ids_with_indexdate_cont_enroll |> 
-  write_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_cont_enroll_mdcr.parquet")
-
-read_parquet("//pharm-psop/UserFolders/Kent_Abdullah Shared/doac-ddi/data/ids_with_indexdate_cont_enroll_mdcr.parquet")  
-
-#Create vector of ENROLID meeting criteria
-ids_with_ce_mdcr <- ids_with_indexdate_cont_enroll$ENROLID ###27,006
-
-#Remove unnecessary objects to preserve RAM
-rm(ids_with_indexdate, ids_with_indexdate_cont_enroll, ids_with_indexdate_enrollment_data, ids_with_indexdate_enrollment_data2)
-
-```
 
 # Study-specific criteria
 
@@ -332,20 +668,40 @@ rm(ids_with_indexdate, ids_with_indexdate_cont_enroll, ids_with_indexdate_enroll
 
 #Filter out patients who do not meet cont_enroll_req criteria
 obj4 <- obj3 |>  
-  mutate(ccae = ENROLID %in% ids_with_ce_ccae) |>
-  mutate(mdcr = ENROLID %in% ids_with_ce_mdcr) |> 
-  filter(ccae == TRUE | mdcr == TRUE) #72,757 obs
+  filter(ENROLID %in% ids_with_ce)
 
 ##Left join object data to outcome data to duplicate person for each hosp (e.g., 1 pt w/ 3 hosp who filled 5 meds = 15 obs)
-obj5 <- left_join(obj4, all_outcome, by = "ENROLID") |> #84,688 obs
+obj5 <- left_join(obj4, all_inpatient_bleed_no_trauma, by = "ENROLID") |> #84,688 obs
   arrange(ENROLID, hospnum, ADMDATE) |> 
-  select(ENROLID, AGE, ADMDATE, indexdt, ADMDATE, DISDATE, obj_period_end, hospnum) |>  
-  mutate(astart = 0) |> 
-  mutate(aend= obj_period_end - indexdt) |> 
-  mutate(aevent = ADMDATE - indexdt) |> 
-  mutate(flag2=ADMDATE<indexdt | ADMDATE >obj_period_end) |> 
-  filter(flag2==FALSE) #9,106
+  mutate(day_obs_start = 0) |> 
+  mutate(day_obs_end = obj_period_end - index_date) |> 
+  mutate(day_of_event = ADMDATE - index_date) |> 
+  mutate(event_occur_outside_obs = ADMDATE<index_date | ADMDATE >obj_period_end) |> 
+  filter(event_occur_outside_obs==FALSE) |>  #17103 (all doac)
+  filter(GENNME == "Apixaban") |> 
+  mutate(object = GENNME) |> 
+  select(c(-GENNME, -event_occur_outside_obs)) #7342 apix
 
+ids_for_loop <- unique(obj5$ENROLID)
+
+dataset_for_loop <- obj5 |> 
+  arrange(ENROLID, ADMDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE) |> 
+  select(ENROLID, index_date, obj_period_end, day_obs_start, day_obs_end, object)
+
+dataset_for_loop_outcome <- obj5 |> 
+  arrange(ENROLID, ADMDATE) |> 
+  select(ENROLID, day_of_event) |> 
+  distinct() |> #10 duplicates (i.e., multiple events same day)
+  group_by(ENROLID) %>%
+  mutate(event_number = row_number()) %>%
+  ungroup() |> 
+  pivot_wider(
+    id_cols = ENROLID, 
+    names_from = event_number, 
+    values_from = day_of_event,
+    names_prefix = "event_"
+  )
 ```
 
 #Precipitant List Generation
@@ -354,23 +710,32 @@ obj5 <- left_join(obj4, all_outcome, by = "ENROLID") |> #84,688 obs
 #Create a list of precipitant drugs that are filled during the object window for each person
 
 obj6 <- obj5 |> 
-  distinct(ENROLID, .keep_all = TRUE) #8,624 obs
+  distinct(ENROLID, .keep_all = TRUE) |>  #8,624 obs 6,350 (new) maybe this is carryover data from statin?
+  select(ENROLID, index_date, obj_period_end)
 
 #Create flag for drugs filled in object window, select distinct drugs, count fills for each, remove statins 
-precip_drug_list <- left_join(obj6, all_drug, by = "ENROLID") |> #1935343
-  mutate(concom = ifelse(SVCDATE >=indexdt & SVCDATE <=obj_period_end, 1, 0)) |> 
+precip_drug_list <- left_join(obj6, all_drug_2009_2021, by = "ENROLID") |> #1935343
+  arrange(ENROLID, SVCDATE) |> 
+  mutate(precip_flag1 = if_else(SVCDATE > obj_period_end, 1, 0 )) |> 
+  filter(precip_flag1 == 0) |> 
+  select(-precip_flag1) |> 
+  mutate(precip_start = SVCDATE) |> 
+  mutate(precip_end = SVCDATE + DAYSUPP) |> 
+  mutate(
+    concom = ifelse(
+      (precip_start <= obj_period_end & precip_end >= index_date), 1, 0
+    )) |> 
   filter(concom ==1) |> 
-  mutate(statin = if_any(GENNME,~ str_detect(.x, paste(object_test, collapse = "|")))) |> 
-  filter(statin==FALSE) |> 
+  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object, collapse = "|")))) |> 
+  filter(doac ==FALSE) |> 
+  select(-doac) |> 
   group_by(GENNME) |> 
   mutate(count = n()) |> 
-  filter(count>=100) |> #Remove bottom 2.5% (see percentiles below). Can adjust as needed
-  distinct(GENNME, .keep_all = TRUE) |> 
   ungroup() |> 
-  select(NDCNUM, GENNME, MASTFRM, THRDTDS)
+  distinct(GENNME, .keep_all = TRUE) |> #1279 drugs; 1070 apixaban
+  filter(count>=30) |> #Remove drugs filled less than 10 times
+  select(NDCNUM, GENNME, MASTFRM, THRDTDS) #787 drugs; 452 apixaban
 
-#  percentiles <- quantile(test$count, probs = c(0.01, 0.025, 0.05, 0.10)) 
-#  percentiles
 
 # Exclusion lists
 excluded_mastfrm <- c("DEV", "CRE", "OIN", "LOT", "GEL", "EMU", "WAX", "TIN", "EMO", "FOA", "PAD", "PAS")
@@ -384,7 +749,7 @@ precipitants <- precip_drug_list %>%
   filter(!MASTFRM %in% excluded_mastfrm) %>%
   filter(!THRDTDS %in% excluded_thrdtds) %>%
   separate(GENNME, into = paste0("col", 1:10), sep = "/", fill = "right") %>% #Parse where "/" separates names. Assumes wont split into more than 10 columns
-  select(starts_with("col"))
+  select(starts_with("col")) #714 drugs - Let's keep split and then evaluate each separately
 
 # Convert data from wide to long format, smush, remove duplicates
 precip_long <- precipitants %>%
@@ -402,12 +767,13 @@ precipitant_full <- precip_split2 %>%
   gather() %>%
   filter(!is.na(value)) |> 
   distinct(value) |> 
-  pull()
+  pull() #515; 401 apixaban
 
-
+#Could do split and combo and just see what the difference is? 
 ```
 
 # Precipitant loop
+
 ```{r}
 
 #Schedule time with Todd to go through if it's working
@@ -420,35 +786,252 @@ results_table <- tibble()
 results_table2 <- tibble()
 results_table3 <- tibble()
 
-precip1 <- all_drug |> 
+precip1 <- all_drug_2009_2021 |> 
   arrange(ENROLID, SVCDATE) |>
   filter(!is.na(AGE)) |> 
-  mutate(pre_fill_end = SVCDATE + DAYSUPP + precip_grace) |>  
+  filter(ENROLID %in% ids_for_loop) |> 
+  mutate(pre_fill_end = SVCDATE + DAYSUPP + (DAYSUPP *0.2)) |>  
   rename(expo_start_date = SVCDATE) |> 
   rename(expo_end_date = pre_fill_end) |> 
-  rename(exposure=GENNME)
+  rename(precipitant=GENNME)
 
-#Loop in drugs in precipitant list
-tic()
-for (i in precipitant) {
-tryCatch({
+
+# Initialize the progress bar
+pb <- progress_bar$new(
+  total = length(precipitant_full),
+  format = "  [:bar] :current/:total (:percent) in :elapsed eta: :eta"
+)
+
+#Evaluate levothyroxine - PROBABLY USE THIS IF YOU CAN. I THINK BETTA. Need to work in loop for meds
+#I think can make precipitant drug fills more "concise" by establishing the windows of exposure early and
+#then build the function to just pick one and evaluate
+#The rowwise below is super slow; try to make more efficient. 
+
+
+precip2 <- precip1 |> 
+  select(ENROLID, precipitant, expo_start_date, expo_end_date) |> 
+  left_join(dataset_for_loop, by = "ENROLID") |> 
+  select(ENROLID, object, day_obs_start, day_obs_end, index_date, obj_period_end, precipitant, expo_start_date, expo_end_date) |> 
+  mutate(day_exposure_start = as.numeric(expo_start_date - index_date)) |> 
+  filter(day_exposure_start <= day_obs_end) |> 
+  mutate(day_exposure_end = as.numeric(expo_end_date - index_date)) |> 
+  filter(day_exposure_end >= 0)
+
+# Function to merge overlapping intervals
+merge_intervals <- function(data) {
+  data <- data[order(data$day_exposure_start), ]
+  merged <- data[1, , drop = FALSE]
+  for (i in 2:nrow(data)) {
+    if (is.na(data$day_exposure_start[i]) || is.na(data$day_exposure_end[i])) {
+      next
+    }
+    if (data$day_exposure_start[i] <= merged$day_exposure_end[nrow(merged)] + 1) {
+      merged$day_exposure_end[nrow(merged)] <- max(merged$day_exposure_end[nrow(merged)], data$day_exposure_end[i], na.rm = TRUE)
+    } else {
+      merged <- rbind(merged, data[i, , drop = FALSE])
+    }
+  }
+  return(merged)
+}
+
+# Apply the function to each ENROLID precipitant group
+collapsed_df <- precip2 %>%
+  mutate(day_obs_end = as.numeric(day_obs_end)) |> 
+  group_by(ENROLID, precipitant) %>%
+  do(merge_intervals(.)) %>%
+  ungroup() |> 
+  select(ENROLID, precipitant, object, day_obs_start, day_obs_end,day_exposure_start, day_exposure_end) |>
+  mutate(risk_window_start = if_else(day_obs_start >= day_exposure_start, day_obs_start, day_exposure_start)) |>
+  mutate(risk_window_end = if_else(day_obs_end <= day_exposure_end, day_obs_end, day_exposure_end)) 
+
+##Now, using this data, need to generate complete windows so unexposed periods are present. 
+
+
+# Generate complete windows
+generate_windows <- function(data) {
+  max_obs_end <- max(data$day_obs_end)
+  windows <- data.frame()
   
+  for (i in 1:nrow(data)) {
+    if (i == 1 && data$risk_window_start[i] > 0) {
+      windows <- rbind(windows, data.frame(
+        ENROLID = data$ENROLID[i],
+        window_start = 0,
+        window_end = data$risk_window_start[i] - 1,
+        exposure = "Unexposed"
+      ))
+    }
+    
+    windows <- rbind(windows, data.frame(
+      ENROLID = data$ENROLID[i],
+      window_start = data$risk_window_start[i],
+      window_end = data$risk_window_end[i],
+      exposure = "Exposed"
+    ))
+    
+    if (i < nrow(data) && data$risk_window_end[i] < data$risk_window_start[i + 1] - 1) {
+      windows <- rbind(windows, data.frame(
+        ENROLID = data$ENROLID[i],
+        window_start = data$risk_window_end[i] + 1,
+        window_end = data$risk_window_start[i + 1] - 1,
+        exposure = "Unexposed"
+      ))
+    }
+  }
+  
+  if (data$risk_window_end[nrow(data)] < max_obs_end) {
+    windows <- rbind(windows, data.frame(
+      ENROLID = data$ENROLID[nrow(data)],
+      window_start = data$risk_window_end[nrow(data)] + 1,
+      window_end = max_obs_end,
+      exposure = "Unexposed"
+    ))
+  }
+  
+  return(windows)
+}
+
+# Apply the function to generate windows
+windows_df <- collapsed_df %>%
+  group_by(ENROLID, precipitant) %>%
+  do(generate_windows(.)) %>%
+  ungroup()
+
+ 
+# windows_df |> 
+#   filter(precipitant == "Azithromycin") |> 
+#   mutate(time = window_end - window_start) |> 
+#   group_by(exposure) |> 
+#   summarise(total_time = sum(time, na.rm = TRUE))
+
+##I think the loop needs to start here.
+precip3 <- precip2 |> 
+  select(ENROLID, object, precipitant) |> 
+  distinct() |> 
+  left_join(windows_df, by = c("ENROLID", "precipitant")) |> 
+  #filter(precipitant == "Levothyroxine Sodium") |> 
+  mutate(exposure = if_else(exposure == "Exposed", 1, 0))
+
+precip4 <- precip3 |> 
+  left_join(dataset_for_loop_outcome, by = "ENROLID") |> 
+  rowwise() %>%
+  mutate(event_indicator = if_else(any(c_across(starts_with("event_")) >= window_start & c_across(starts_with("event_")) <= window_end), 1, 0)) %>%
+  ungroup() |> 
+  mutate(event_indicator = replace_na(event_indicator, 0)) |> 
+  select(ENROLID, object, precipitant, window_start, window_end, exposure, event_indicator) |> 
+  mutate(time_at_risk = window_end - window_start + 1) %>%
+  mutate(offset_term = log(time_at_risk))
+
+#Let's run it!
+model <- clogit(event_indicator ~ exposure + offset(offset_term) + strata(ENROLID), data = precip4)
+summary(model)
+
+
+###REVISED LOOP#####
+library(profvis)
+library(rstanarm)
+
+# Initialize the results tables
+results_table <- data.frame()
+results_table2 <- data.frame()
+
+for (i in precipitant_full) {
+  tryCatch({
+    # Update the progress bar (if you have one)
+    pb$tick()
+ # Combine with original data
+    precip3 <- precip2 |> 
+      select(ENROLID, object, precipitant) |> 
+      distinct() |> 
+      left_join(windows_df, by = c("ENROLID", "precipitant")) |> 
+      filter(precipitant == i) |>  # Filter for the current precipitant
+      mutate(exposure = if_else(exposure == "Exposed", 1, 0))
+
+    precip4 <- precip3 |> 
+      left_join(dataset_for_loop_outcome, by = "ENROLID") |> 
+      rowwise() %>%
+      mutate(event_indicator = if_else(any(c_across(starts_with("event_")) >= window_start & c_across(starts_with("event_")) <= window_end), 1, 0)) %>%
+      ungroup() |> 
+      mutate(event_indicator = replace_na(event_indicator, 0)) |> 
+      select(ENROLID, object, precipitant, window_start, window_end, exposure, event_indicator) |> 
+      mutate(time_at_risk = window_end - window_start + 1) %>%
+      mutate(offset_term = log(time_at_risk))
+
+    # Fit the Cox model - use this. stan_glmer doesn't work
+    # model <- clogit(event_indicator ~ exposure + offset(offset_term) + strata(ENROLID), data = precip4)
+    # summary_model <- summary(model)
+   
+     # Fit the Bayesian mixed-effects model
+    model <- stan_glmer(event_indicator ~ exposure + offset(offset_term) + (1 | ENROLID), data = precip4, family = binomial(), prior = normal(0, 1), chains = 4, iter = 2000)
+
+    # Extract posterior estimates
+    summary_model <- summary(model)
+
+    # Extract coefficients and confidence intervals
+    coef_df <- as.data.frame(summary_model$coefficients) %>% janitor::clean_names() %>% mutate(drug = i)
+    confint_df <- as.data.frame(summary_model$conf.int) %>% janitor::clean_names() %>% mutate(drug = i)
+
+
+
+    #   
+    # # Extract coefficients and confidence intervals
+    # coef_df <- summary_model$coefficients |> as.data.frame() |> janitor::clean_names() |> mutate(drug = i)
+    # confint_df <- summary_model$conf.int |> as.data.frame() |> janitor::clean_names() |> mutate(drug = i)
+
+    # Append to results tables
+    results_table <- bind_rows(results_table, confint_df)
+    results_table2 <- bind_rows(results_table2, coef_df)
+
+  }, error=function(e) {
+    cat("ERROR :", conditionMessage(e), "\n")
+  })
+}
+
+# Combine results tables and adjust p-values
+# results_table3 <- bind_cols(results_table, results_table2$pr_z, results_table2$se_coef) |> janitor::clean_names()
+
+results_table3 <- bind_cols(results_table, results_table2[, c("pr_z", "se_coef")]) %>% janitor::clean_names()
+
+adjusted_pval <- p.adjust(results_table3$x6, method = "fdr") |> as.data.frame() |> janitor::clean_names()
+
+results_table4 <- bind_cols(results_table3, adjusted_pval) |> 
+  rename(adjusted_pval = p_adjust_results_table3_x6_method_fdr) |> 
+  rename(p_value = x6) |> 
+  rename(se = x7) |> 
+  arrange(adjusted_pval)
+
+  # Assuming `precipitant_full` is a vector of all precipitant names
+  precipitant_full <- unique(precipitant_full)
+  pb <- progress_bar$new(
+    format = "[:bar] :current/:total (:percent) :elapsed",
+    total = length(precipitant_full),
+    clear = FALSE
+  )
+
+#precipitant_full <- "Levothyroxine Sodium"
+#Loop in drugs in precipitant list
+tic() #33 min
+for (i in precipitant_full) {
+tryCatch({
+  # Update the progress bar
+    pb$tick()
+
 #Create Precipitant Data Set  
 precip2<- precip1 |> 
-  select(ENROLID, exposure, expo_start_date, expo_end_date) |> 
-  mutate(precipitant = if_any(exposure,~ str_detect(.x, i))) |> 
-  filter(precipitant==TRUE) |> 
+  select(ENROLID, precipitant, expo_start_date, expo_end_date) |> 
+  mutate(precip = if_any(precipitant,~ str_detect(.x, i))) |> 
+  filter(precip==TRUE) |> 
   left_join(obj5, precip2, by = "ENROLID") |> 
-  select(ENROLID, astart, aend, aevent, expo_start_date, expo_end_date, hospnum, indexdt) |>
-  mutate(aexpo=expo_start_date-indexdt) |> 
-  filter(aexpo<=aend) |> 
-  mutate(aendexpo=expo_end_date-indexdt) |> 
+  select(ENROLID, day_obs_start, day_obs_end, day_of_event, expo_start_date, expo_end_date, hospnum, index_date) |>
+  mutate(aexpo=expo_start_date-index_date) |> 
+  filter(aexpo<=day_obs_end) |> 
+  mutate(aendexpo=expo_end_date - index_date) |> 
   filter(aendexpo>=0) |> 
-  mutate(event_exp=ifelse(aevent>=aexpo & aevent<=aendexpo, 1, 0)) |> 
-  mutate(astart=as.integer(astart)) |> 
+  mutate(event_exp=ifelse(day_of_event>=aexpo & day_of_event<=aendexpo, 1, 0)) |> 
+  mutate(day_obs_start=as.integer(day_obs_start)) |> 
   distinct() 
 
-regression <- standardsccs(aevent~aexpo, indiv=ENROLID, astart=astart, aend=aend, aevent=aevent, adrug=aexpo, aedrug=aendexpo, dataformat="stack", data=precip2)
+regression <- standardsccs(day_of_event~aexpo, indiv=ENROLID, astart=day_obs_start, aend=day_obs_end, aevent=day_of_event, adrug=aexpo, aedrug=aendexpo, dataformat="stack", data=precip2)
 regression
 
 # #Test
@@ -486,7 +1069,8 @@ results_table4 <- bind_cols(results_table3, adjusted_pval) |>
   arrange(adjusted_pval)
 toc() #150s (6 drugs); 5928s (385 drugs)
 
-write.csv(results_table4, "output.csv", row.names = FALSE)
+write.csv(results_table4, "output2.csv", row.names = FALSE)
+write.xlsx(results_table4, "output2.xlsx", row.names = FALSE)
 
 
 # results_table2 <- results_table2 |> 
@@ -561,7 +1145,7 @@ tm <- forest_theme(
   ci_lty = 1,  # Confidence interval line type
   ci_lwd = 1.5,  # Confidence interval line width
   ci_Theight = 0.2,  # Set a "T" end at the end of CI
-  refline_lwd = 1,  # Reference line width
+  refline_lwd = 2,  # Reference line width
   refline_lty = "dashed",  # Reference line type
   refline_col = "grey20",  # Reference line color
   vertline_lwd = 1,  # Vertical line width
@@ -594,7 +1178,8 @@ forest_data$`HR (95% CI)` <- ifelse(
 
 forest_data <- forest_data |> 
   relocate("Adjusted p-value", .after = last_col()) |> 
-  mutate(across("Adjusted p-value", round, 3))
+  mutate(across("Adjusted p-value", round, 3)) |> 
+  arrange(`Adjusted p-value`)
 
 # Create forest plot
 p <- forest(
@@ -615,9 +1200,49 @@ p <- forest(
 # plot(p)
 
 
-ggsave("plot.png", plot = p, height = 90, width = 10, limitsize = FALSE)
+ggsave("plot.png", plot = p, height = 55, width = 10, dpi = 330, limitsize = FALSE)
 
 ```
+
+#Generate Table 1
+```{r}
+##Create cohort of statin users
+tab1a <- obj2 |> 
+  group_by(ENROLID) |> 
+  mutate(obj_period_end = max(obj_fill_end)) |> 
+  ungroup() |> 
+  select(ENROLID, GENNME, AGE, SEX, indexdt, dataset, obj_period_end) |> 
+  distinct(ENROLID, .keep_all = TRUE) #101,556 unique users (old); 21443 (new)
+
+#Filter out patients who do not meet cont_enroll_req criteria
+tab1b <- tab1a |>  
+  mutate(ccae = ENROLID %in% ids_with_ce_ccae) |>
+  mutate(mdcr = ENROLID %in% ids_with_ce_mdcr) |> 
+  filter(ccae == TRUE | mdcr == TRUE) #72,757 obs
+
+##Left join object data to outcome data to duplicate person for each hosp (e.g., 1 pt w/ 3 hosp who filled 5 meds = 15 obs)
+tab1c <- left_join(tab1b, all_outcome, by = "ENROLID") |> #84,688 obs
+  arrange(ENROLID, hospnum, ADMDATE) |> 
+  select(ENROLID, GENNME, SEX, AGE, ADMDATE, indexdt, ADMDATE, DISDATE, obj_period_end, hospnum) |>  
+  mutate(astart = 0) |> 
+  mutate(aend= obj_period_end - indexdt) |> 
+  mutate(aevent = ADMDATE - indexdt) |> 
+  mutate(flag2=ADMDATE<indexdt | ADMDATE >obj_period_end) |> 
+  filter(flag2==FALSE) |>  #9,106 7,818
+  mutate(GENNME = ifelse(GENNME == "Rivaroxaban;Rivaroxaban", "Rivaroxaban", GENNME))
+
+tab1d <- tab1c |> 
+  arrange(ENROLID, ADMDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE)
+
+tab1d |> 
+  group_by(GENNME) |> 
+  summary(AGE) 
+
+
+```
+
+
 
 # Recycling Bin
 
@@ -697,3 +1322,106 @@ toc()
 
 ##Works the same speed map vs. for loop.
 ```
+
+# Old outcome code
+```{r}
+#Filter and collect mdcrs cases with transfusion REVCODE 
+mdcrs_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/s") |> 
+  select(c(ENROLID, YEAR, ADMDATE, DISDATE, REVCODE)) |> 
+  to_duckdb() |> 
+  filter(REVCODE %in% c("0390", "0391") & !is.na(ENROLID)) |> 
+  distinct(ENROLID, .keep_all = TRUE) |> 
+  collect() #1304548 obs
+
+#Collect the inpatient (time: 9 minutes for full)
+mdcri_2009_2021_bleed <- open_dataset("//pharm-psop/Truven Data/Truven Data R/mdcr/i", unify_schemas = TRUE) |> #24224052 obs
+  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, DXVER, PDX, DX1:DX15, PROC1:PROC15)) |> 
+  to_duckdb() |> 
+  collect() 
+
+#Merge mdcri with mdcrs to get REVCODE
+mdcri_2009_2021_bleed_merge <- mdcri_2009_2021_bleed |> 
+  left_join(mdcrs_2009_2021_bleed, by = c("ENROLID", "YEAR", "ADMDATE", "DISDATE")) |> 
+  filter(!is.na(ENROLID)) |>
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER))
+
+#Identify IDs with event in mdcr using criteria outlined by Leonard et al (time: 14 min)
+mdcr_bleed_outcome_2009_2021 <- mdcri_2009_2021_bleed_merge |> #24168165 obs
+  #filter(YEAR == 2021) |>  #test to make sure working on small dataset
+  #filter(ENROLID == 4082398001) |> 
+  mutate(
+    bleed_code = if_else(
+      is.na(DXVER) | DXVER == 9, #think can remove is.na(DXVER but not checking now)
+      if_any(PDX, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+        (if_any(PDX, ~str_detect(.x, {{all_gib_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+            !is.na(REVCODE))) | 
+      (if_any(PDX, ~str_detect(.x, {{all_unspec_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})))) |
+      (if_any(PDX, ~ gu_icd9_possible %in% .x)  &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}}))) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_comb_sec}})))),
+      if_else(
+        DXVER == 0, 
+        if_any(PDX, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+          (if_any(PDX, ~str_detect(.x, {{all_gib_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+                !is.na(REVCODE))) | 
+          (if_any(PDX, ~str_detect(.x, {{all_unspec_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})))),
+        NA
+      )
+    )
+  ) |>
+  group_by(ENROLID) |> 
+  mutate(bleed_ever = as.integer(any(bleed_code))) |> 
+  filter(bleed_ever == 1) |> #797760 - now 796266 - maybe old ICD codes were errant?
+  ungroup() 
+
+
+mdcr_bleed_outcome2 <- mdcr_bleed_outcome_2009_2021 |> 
+  mutate(
+    trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  ) #796266
+
+
+mdcr_bleed_outcome_no_trauma <- mdcr_bleed_outcome2 |> 
+  filter(!(trauma_code & bleed_code)) |> #Filters out ind w/ trauma code during bleed hosp - 787434
+  group_by(ENROLID) %>%
+  filter(!(all(bleed_code == FALSE))) |>  #Filters out ind who only have FALSE bleed codes remaining (bleed only occurred w/ trauma) #773845 (what was this?)
+  ungroup() |> 
+  arrange(ENROLID, ADMDATE) |> 
+  group_by(ENROLID) |> 
+  mutate(
+    lag_date = lag(DISDATE),
+    lead_date = lead(ADMDATE),
+    lag_trauma = lag(trauma_code),
+    lead_trauma = lead(trauma_code),
+    prev_trauma_flag = +(bleed_code & lag_trauma & lag_date >= ADMDATE - 1), #flags ind w/ prev hosp w/ trauma code
+    next_trauma_flag = +(bleed_code & lead_trauma & lead_date <= ADMDATE + 1),
+    trauma_exclude_flag = +(prev_trauma_flag | next_trauma_flag) # Flag for trauma code day prior, day of, or day after admission
+  ) |> 
+  filter(trauma_exclude_flag == 0 | is.na(trauma_exclude_flag)) |> # Exclude those individuals
+  group_by(ENROLID) |> 
+  filter(!(all(bleed_code == FALSE))) |> # Re-filters those who only have false bleed codes now #806985 obs
+  ungroup()
+
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+mdcr_bleed_outcome_no_trauma |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_inpatient_bleed_no_trauma.parquet")
+
+#Open dataset
+mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_inpatient_bleed_no_trauma.parquet")
+```
+
