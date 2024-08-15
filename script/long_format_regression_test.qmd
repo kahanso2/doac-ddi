@@ -1,0 +1,1306 @@
+---
+title: "Long_format_regression_test"
+format: html
+editor: visual
+---
+
+```{r}
+##TRY THIS MEGA LOOP
+# Initialize the final results table
+final_results_table <- data.frame()
+
+# Loop over each OAC
+for (oac in object_oac) {
+  cat("Processing OAC:", oac, "\n")
+
+##Left join object data to outcome data to duplicate person for each hosp (e.g., 1 pt w/ 3 hosp who filled 5 meds = 15 obs)
+analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma, by = "ENROLID") |> 
+  arrange(ENROLID, hospnum, ADMDATE) |> 
+  mutate(day_obs_start = 0) |> 
+  mutate(day_obs_end = obj_period_end - index_date) |> 
+  mutate(day_of_event = ADMDATE - index_date) |> 
+  mutate(event_occur_outside_obs = ADMDATE < index_date | ADMDATE > obj_period_end) |> 
+  filter(event_occur_outside_obs==FALSE) |>  #17103 (all doac); 5767 obs
+  filter(GENNME == "Apixaban") |> 
+  mutate(object = GENNME) |> 
+  select(c(-GENNME, -event_occur_outside_obs)) #7342 apix; 1943 apix; 1790 rivaroxaban; 1518 apixaban
+
+ids_for_loop <- unique(analytic_cohort_oac$ENROLID)
+
+dataset_for_loop <- analytic_cohort_oac |> 
+  arrange(ENROLID, ADMDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE) |> 
+  select(ENROLID, index_date, obj_period_end, day_obs_start, day_obs_end, object)
+
+dataset_for_loop_outcome <- analytic_cohort_oac |> 
+  arrange(ENROLID, ADMDATE) |> 
+  select(ENROLID, day_of_event) |> 
+  distinct() |> #10 duplicates (i.e., multiple events same day)
+  group_by(ENROLID) |>
+  mutate(event_number = row_number()) |>
+  ungroup() |> 
+  pivot_wider(
+    id_cols = ENROLID, 
+    names_from = event_number, 
+    values_from = day_of_event,
+    names_prefix = "event_"
+  )
+
+
+#Precipitant List Generation
+
+
+#Create a list of precipitant drugs that are filled during the object window for each person
+
+#Step 1: Isolate ENROLIDs and retain index date and stop date (i.e., obj period end)
+precipitant_cohort <- analytic_cohort_oac |> 
+  arrange(ENROLID, ADMDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE) |>  
+  select(ENROLID, object, index_date, obj_period_end)
+
+#Join ENROLID with entire drug data file to pull in Rx history. Filter for drugs used in obj_wind
+precipitant_cohort_2 <- left_join(precipitant_cohort, all_drug_2009_2021, by = "ENROLID") |> #595155
+  arrange(ENROLID, SVCDATE) |> 
+  mutate(precip_start = SVCDATE) |> 
+  mutate(precip_end = SVCDATE + DAYSUPP) |> 
+  mutate(
+    concom = if_else(
+      (precip_start <= obj_period_end & precip_end >= index_date), 1, 0
+    )) |> 
+  filter(concom ==1) |> 
+  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object_oac, collapse = "|")))) |> 
+  filter(doac ==FALSE) |> 
+  select(-doac) 
+
+#Filter out the drugs from the exclusion list plus a few additional outliers
+precipitant_cohort_3 <- precipitant_cohort_2|> 
+  filter(!MASTFRM %in% excluded_mastfrm) |>
+  filter(!THRDTDS %in% excluded_thrdtds) |> 
+  filter(!str_detect(THRDTDS, "S/M")) |> 
+  filter(!GENNME %in% excluded_gennme)
+
+#Pull out the individual drugs. Split out combination products
+precipitant_active_ingredients <- precipitant_cohort_3 |> 
+  separate(GENNME, into = paste0("col", 1:10), sep = "/", fill = "right") |> 
+  pivot_longer(cols = starts_with("col"), names_to = "name", values_to = "GENNME", values_drop_na = TRUE, names_repair = "unique") |> 
+  separate(GENNME, into = paste0("drug", 1:10), sep = ";", fill = "right") |> 
+  pivot_longer(cols = starts_with("drug"), names_to = "name2", values_to = "GENNME", values_drop_na = TRUE, names_repair = "unique") |> 
+  filter(!is.na(GENNME)) |> 
+  select(ENROLID, GENNME)
+
+
+# Write the precipitants dataframe to an Excel file to allow manual renaming for mismatches
+#write.xlsx(precipitant_active_ingredient, file = "precipitant_active_ingredient.xlsx")
+
+# Created a mapping pathway for drugs used with ANY OAC. Read in here
+drug_mapping <- read_excel("drug_mapping.xlsx")
+
+#First use the mapping to correct names in the drug list 
+precipitant_active_ingredient_mapped <- precipitant_active_ingredients |> 
+  left_join(drug_mapping, by = "GENNME") |> 
+  mutate(GENNME = if_else(is.na(NEWNAME), GENNME, NEWNAME)) |> 
+  select(-NEWNAME)
+
+# Count unique ENROLID for each drug and limit drug list to those used among 5+ unique people
+drug_counts <- precipitant_active_ingredient_mapped %>%
+  group_by(GENNME) %>%
+  summarise(unique_enrolid_count = n_distinct(ENROLID)) |> 
+  filter(unique_enrolid_count > 4)
+
+# Save as a vector for future use in a loop
+precipitant_vector <- unique(drug_counts$GENNME)
+
+#Next use the mapping to correct names in the precipitant dataset. 
+##First derive function
+replace_drug_names_in_string <- function(drug_string, mapping) {
+  for (i in 1:nrow(mapping)) {
+    drug_string <- gsub(mapping$GENNME[i], mapping$NEWNAME[i], drug_string, fixed = TRUE)
+  }
+  return(drug_string)
+}
+
+# Apply the function to the GENNME column in the main dataset
+precipitant_cohort_4 <- precipitant_cohort_3 %>%
+  arrange(ENROLID, SVCDATE) |>
+  filter(!is.na(AGE)) |> 
+  filter(ENROLID %in% ids_for_loop) |> 
+  mutate(GENNME = sapply(GENNME, replace_drug_names_in_string, mapping = drug_mapping))
+
+# Modify cohort so have appropriate variable names for later
+precipitant_cohort_5 <- precipitant_cohort_4 |> 
+  mutate(pre_fill_end = SVCDATE + DAYSUPP ) |>  #Removing grace for now: + (DAYSUPP *0.2)
+  rename(expo_start_date = SVCDATE) |> 
+  rename(expo_end_date = pre_fill_end) |> 
+  rename(precipitant=GENNME)
+
+
+
+
+#Apply days' supply cleaning to precipitants
+
+
+precipitant_cohort_6 <- precipitant_cohort_5 |> 
+  group_by(ENROLID, precipitant) %>%
+  arrange(expo_start_date) %>%
+  mutate(negative_days_flag = DAYSUPP < 0, 
+         cancel_flag = FALSE,
+         days_to_closest_positive_claim = NA)
+
+# Identify pairs of positive and negative claims
+# Define a function to process each group
+process_group <- function(df) {
+  for (i in seq_len(nrow(df))) {
+    if (df$negative_days_flag[i]) {
+      # Get the current service date and days supply for the negative claim
+      svcdate <- df$expo_start_date[i]
+      daysupp_negative <- df$DAYSUPP[i]
+      
+      # Check for positive claims on the same day or within 15 days prior
+      positive_claims_15 <- df %>%
+        filter(
+          expo_start_date <= svcdate,
+          expo_start_date >= (svcdate - days(15)),
+          DAYSUPP > 0
+        )
+      
+      # Check for exact match positive claims within 60 days prior
+      exact_match_60 <- df %>%
+        filter(
+          expo_start_date <= svcdate,
+          expo_start_date >= (svcdate - days(60)),
+          DAYSUPP == abs(daysupp_negative)
+        )
+      
+      # If there are positive claims within 15 days, find the closest one
+      if (nrow(positive_claims_15) > 0) {
+        closest_positive_claim <- positive_claims_15 %>%
+          arrange(desc(expo_start_date)) %>%
+          slice(1)
+        
+        days_diff <- as.numeric(difftime(svcdate, closest_positive_claim$expo_start_date, units = "days"))
+        df$days_to_closest_positive_claim[i] <- days_diff
+        
+        # Set the cancel flag for both the negative and positive claims
+        df$cancel_flag[i] <- TRUE
+        df$cancel_flag[df$expo_start_date == closest_positive_claim$expo_start_date &
+                       df$DAYSUPP == closest_positive_claim$DAYSUPP] <- TRUE
+      }
+      
+      # If there are exact match positive claims within 60 days, find the closest one
+      if (nrow(exact_match_60) > 0) {
+        closest_positive_claim <- exact_match_60 %>%
+          arrange(desc(expo_start_date)) %>%
+          slice(1)
+        
+        # Set the cancel flag for both the negative and positive claims
+        df$cancel_flag[i] <- TRUE
+        df$cancel_flag[df$expo_start_date == closest_positive_claim$expo_start_date &
+                       df$DAYSUPP == closest_positive_claim$DAYSUPP] <- TRUE
+      }
+    }
+  }
+  return(df)
+}
+
+# Apply the function to each group
+precipitant_cohort_7 <- precipitant_cohort_6 %>%
+  group_by(ENROLID, precipitant) %>%
+  group_modify(~ process_group(.x)) %>%
+  ungroup()
+
+# Remove cancelled claims
+precipitant_cohort_8 <- precipitant_cohort_7 |>
+  filter(!cancel_flag & !negative_days_flag)
+
+
+# Precipitant loop
+
+
+
+
+
+
+##Creates days of exposure start and end, but it creates problems when there are negative ds
+precipitant_cohort_9 <- precipitant_cohort_8 |> 
+  select(ENROLID, precipitant, expo_start_date, expo_end_date) |> 
+  left_join(dataset_for_loop, by = "ENROLID") |> 
+  select(ENROLID, object, day_obs_start, day_obs_end, index_date, obj_period_end, precipitant, expo_start_date, expo_end_date) |> 
+  mutate(day_exposure_start = as.numeric(expo_start_date - index_date)) |> 
+  filter(day_exposure_start <= day_obs_end) |> 
+  mutate(day_exposure_end = as.numeric(expo_end_date - index_date)) |> 
+  filter(day_exposure_end >= 0) |> 
+  mutate(nsaid = if_any(precipitant, ~ str_detect(.x, paste(nsaids, collapse = "|")))) |> 
+  mutate(antiplatelet = if_any(precipitant, ~ str_detect(.x, paste(antiplatelet, collapse = "|")))) |> 
+  mutate(other_anticoag = if_any(precipitant, ~ str_detect(.x, paste(other_anticoag, collapse = "|")))) |>
+  mutate(ssri_snri = if_any(precipitant, ~ str_detect(.x, paste(ssri_snri, collapse = "|")))) |>
+  arrange(ENROLID, day_obs_start)
+
+##Add in covariates for nsaid and antiplatelet use
+nsaid_data <- precipitant_cohort_9 |> 
+  filter(nsaid == TRUE) |> 
+  rowwise() %>%
+  mutate(days = list(day_obs_start:day_obs_end)) %>%
+  unnest(cols = c(days)) |> 
+  group_by(ENROLID, days) %>%
+  mutate(
+    nsaid_exposed = if_else(
+      any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
+    ) %>%
+  ungroup() |> 
+  distinct(ENROLID, object, days, nsaid_exposed) 
+
+antiplatelet_data <- precipitant_cohort_9 |> 
+  filter(antiplatelet == TRUE) |> 
+  rowwise() %>%
+  mutate(days = list(day_obs_start:day_obs_end)) %>%
+  unnest(cols = c(days)) |> 
+  group_by(ENROLID, days) %>%
+  mutate(
+    antiplatelet_exposed = if_else(
+      any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
+    ) %>%
+  ungroup() |> 
+  distinct(ENROLID, object, days, antiplatelet_exposed)
+
+other_anticoag_data <- precipitant_cohort_9 |> 
+  filter(other_anticoag == TRUE) |> 
+  rowwise() %>%
+  mutate(days = list(day_obs_start:day_obs_end)) %>%
+  unnest(cols = c(days)) |> 
+  group_by(ENROLID, days) %>%
+  mutate(
+    other_anticoag_exposed = if_else(
+      any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
+    ) %>%
+  ungroup() |> 
+  distinct(ENROLID, object, days, other_anticoag_exposed)
+
+ssri_snri_data <- precipitant_cohort_9 |> 
+  filter(ssri_snri == TRUE) |> 
+  rowwise() %>%
+  mutate(days = list(day_obs_start:day_obs_end)) %>%
+  unnest(cols = c(days)) |> 
+  group_by(ENROLID, days) %>%
+  mutate(
+    ssri_snri_exposed = if_else(
+      any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
+    ) %>%
+  ungroup() |> 
+  distinct(ENROLID, object, days, ssri_snri_exposed)
+
+
+# Initialize the results tables
+results_table <- data.frame()
+
+
+# Function to expand the observation period and mark exposure
+expand_and_mark_exposure <- function(data, precipitant_name) {
+  # Expand observation period
+  long_data <- data %>%
+    rowwise() %>%
+    mutate(days = list(day_obs_start:day_obs_end)) %>%
+    unnest(cols = c(days))
+  
+  # Mark exposure period
+  long_data <- long_data %>%
+    group_by(ENROLID, days) %>%
+    mutate(
+      exposed = if_else(precipitant == precipitant_name &
+        any(days >= day_exposure_start & days <= day_exposure_end), 
+        1, 0
+      )
+    ) %>%
+    distinct(ENROLID, object, days, exposed) %>%
+    ungroup()
+  
+    # Join with outcome data
+  test <- long_data %>%
+    left_join(dataset_for_loop_outcome, by = "ENROLID") %>%
+    mutate(event = if_else(days == event_1 | days == event_2, 1, 0, missing = 0)) |> #Need to check number of events. 2 max in data now
+    select(-c(event_1, event_2))
+  
+  return(test)
+}
+
+#Loop for each precipitant: 
+
+for (i in precipitant_vector) {
+  tryCatch({
+    # Filter the data for the current precipitant
+    data <- precipitant_cohort_9 %>%
+      filter(str_detect(precipitant, "Levothyroxine Sodium"))
+
+# Apply the function to the data
+result <- expand_and_mark_exposure(data, "Levothyroxine Sodium")
+
+#Merge in NSAID data
+result_cov <- result |> 
+  left_join(nsaid_data, by = c("ENROLID", "object", "days" )) |> 
+  left_join(antiplatelet_data, by = c("ENROLID", "object", "days" ))  |>
+  left_join(other_anticoag_data, by = c("ENROLID", "object", "days" ))  |> 
+  left_join(ssri_snri_data, by = c("ENROLID", "object", "days" ))  |> 
+  mutate(nsaid_exposed = if_else(is.na(nsaid_exposed), 0, nsaid_exposed),
+         antiplatelet_exposed = if_else(is.na(antiplatelet_exposed), 0, antiplatelet_exposed),
+         other_anticoag_exposed = if_else(is.na(other_anticoag_exposed), 0, other_anticoag_exposed),
+         ssri_snri_exposed = if_else(is.na(ssri_snri_exposed), 0, ssri_snri_exposed)) 
+  
+# Apply the function to create the binary indicator
+df <- result_cov %>%
+  group_by(ENROLID) %>%
+  arrange(ENROLID, days) %>%
+  mutate(
+    nsaid_30 = rollapplyr(nsaid_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
+    antiplatelet_30 = rollapplyr(antiplatelet_exposed, width = 30, FUN = sum, fill = NA, align = "right"), 
+    other_anticoag_30 = rollapplyr(other_anticoag_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
+    ssri_snri_30 = rollapplyr(ssri_snri_exposed, width = 30, FUN = sum, fill = NA, align = "right")) %>%
+  mutate(
+    nsaid_30 = if_else(!is.na(nsaid_30) & nsaid_30 > 0, 1, 0),
+    antiplatelet_30 = if_else(!is.na(antiplatelet_30) & antiplatelet_30 > 0, 1, 0), 
+    other_anticoag_30 = if_else(!is.na(other_anticoag_30) & other_anticoag_30 > 0, 1, 0), 
+    ssri_snri_30 = if_else(!is.na(ssri_snri_30) & ssri_snri_30 > 0, 1, 0)) %>%
+  ungroup() |> 
+  mutate(
+    antiplatelet_30 = if_else(antiplatelet_exposed == 1, 1, antiplatelet_30),
+    nsaid_30 = if_else(nsaid_exposed == 1, 1, nsaid_30),
+    other_anticoag_30 = if_else(other_anticoag_exposed == 1, 1, other_anticoag_30),
+    ssri_snri_30 = if_else(ssri_snri_exposed == 1, 1, ssri_snri_30)) 
+
+df <- df %>%
+  mutate(offset = log(1))
+
+# Fit the conditional Poisson regression model
+df$ENROLID <- as.factor(df$ENROLID)
+
+model <- gnm(event ~ exposed + antiplatelet_30 + nsaid_30 + other_anticoag_30 + ssri_snri_30 , eliminate = ENROLID, family = poisson(), data = df)
+model_summary <- summary(model)
+model_summary
+
+coefs <- coef(model_summary)
+    coefs_exp <- exp(coef(model))
+    confints <- confint(model, parm = "exposed")
+    confints_exp <- exp(confints) 
+
+confints_exp    
+# Confidence interval using confint for comparison
+confints <- confint(model, parm = "exposed")
+
+# Print confint results
+print(confints)
+
+# Compare with manually calculated confidence intervals
+manual_confints <- c(confint_lower, confint_upper)
+names(manual_confints) <- c("2.5 %", "97.5 %")
+
+# Print manual confidence intervals
+print(manual_confints)
+    
+confints_exp
+  combined_df2 <- data.frame(
+      Estimate = coefs[1, 1],
+      IRR = coefs_exp[1],
+      SE = coefs[1,2],
+      z_value = coefs[1,3],
+      p_value = coefs[1,4],
+      `Lower 95%` = confints_exp[1],
+      `Upper 95%` = confints_exp[2], 
+      drug = i)
+  
+
+coef_exposed <- coef(model)["exposed"]
+se_exposed <- sqrt(vcov(model)["exposed", "exposed"])
+
+get_confints <- function(model, parm) {
+  try({
+    # Attempt to get profile likelihood confidence intervals
+    confints <- confint(model, parm = parm)
+    confints_exp <- exp(confints)
+    return(confints_exp)
+  }, silent = TRUE)
+  
+  # If `confint` fails, proceed to manual calculation
+  coef_parm <- coef(model)[parm]
+  se_parm <- sqrt(vcov(model)[parm, parm])
+  alpha <- 0.05
+  z_value <- qnorm(1 - alpha / 2)
+  confint_lower <- coef_parm - z_value * se_parm
+  confint_upper <- coef_parm + z_value * se_parm
+  confints_manual <- c(confint_lower, confint_upper)
+  names(confints_manual) <- c("2.5 %", "97.5 %")
+  confints_exp_manual <- exp(confints_manual)
+  
+  return(confints_exp_manual)
+}
+confints_exposed <- get_confints(model, "exposed")
+  
+# Append to results table
+    results_table <- bind_rows(results_table, combined_df2)
+    
+  }, error = function(e) {
+    cat("ERROR :", conditionMessage(e), "\n")
+    stop(paste("Error occurred with precipitant drug:", i))
+  })
+}
+```
+
+#Debugging
+
+```{r}
+#Debugging:
+
+# Define your function to expand the observation period and mark exposure
+expand_and_mark_exposure <- function(data, precipitant_name) {
+  # Expand observation period
+  long_data <- data %>%
+    rowwise() %>%
+    mutate(days = list(day_obs_start:day_obs_end)) %>%
+    unnest(cols = c(days))
+  
+  # Mark exposure period
+  long_data <- long_data %>%
+    group_by(ENROLID, days) %>%
+    mutate(
+      exposed = if_else(precipitant == precipitant_name &
+        any(days >= day_exposure_start & days <= day_exposure_end), 
+        1, 0
+      )
+    ) %>%
+    distinct(ENROLID, object, days, exposed) %>%
+    ungroup()
+  
+  # Join with outcome data
+  test <- long_data %>%
+    left_join(dataset_for_loop_outcome, by = "ENROLID") %>%
+    mutate(event = if_else(days == event_1 | days == event_2, 1, 0, missing = 0)) %>%
+    select(-c(event_1, event_2)) |> 
+    arrange(ENROLID, days) %>%  # Ensure data is ordered correctly
+  group_by(ENROLID) %>%  # Group by ENROLID to apply the logic per individual
+  mutate(washout = if_else(lag(exposed, 0) == 1 | lag(exposed, 1) == 1 | 
+                           lag(exposed, 2) == 1 | lag(exposed, 3) == 1 |
+                           lag(exposed, 4) == 1 | lag(exposed, 5) == 1 |
+                           lag(exposed, 6) == 1, 1, 0)) %>%
+  ungroup() |> 
+  mutate(washout = if_else(exposed == 1 & washout == 1, 0, washout)) |> 
+  arrange(ENROLID, days)
+  
+  return(test)
+}
+
+# Function to get confidence intervals
+get_confints <- function(model, parm) {
+  try({
+    # Attempt to get profile likelihood confidence intervals
+    confints <- confint(model, parm = parm)
+    confints_exp <- exp(confints)
+    return(confints_exp)
+  }, silent = TRUE)
+  
+ # If `confint` fails, proceed to manual calculation
+  coef_parm <- coef(model)[parm]
+  se_parm <- sqrt(vcov(model)[parm, parm])
+  alpha <- 0.05
+  z_value <- qnorm(1 - alpha / 2)
+  confint_lower <- coef_parm - z_value * se_parm
+  confint_upper <- coef_parm + z_value * se_parm
+  confints_manual <- c(confint_lower, confint_upper)
+  names(confints_manual) <- c("2.5 %", "97.5 %")
+  confints_exp_manual <- exp(confints_manual)
+  
+  return(confints_exp_manual)
+}
+
+# Initialize the results tables
+results_table <- data.frame()
+
+# Loop through each precipitant
+for (i in precipitant_vector) {
+  tryCatch({
+    cat("Processing precipitant:", i, "\n") # Debug statement
+    
+    # Filter the data for the current precipitant
+    data <- precipitant_cohort_9 %>%
+      filter(str_detect(precipitant, i))
+    
+    if (nrow(data) == 0) {
+      stop(paste("No data found for precipitant:", i))
+    }
+    
+    # Apply the function to the data
+    result <- expand_and_mark_exposure(data, i)
+    
+    #Merge in NSAID data
+    result_cov <- result |> 
+      left_join(nsaid_data, by = c("ENROLID", "object", "days" )) |> 
+      left_join(antiplatelet_data, by = c("ENROLID", "object", "days" ))  |> 
+      left_join(other_anticoag_data, by = c("ENROLID", "object", "days" ))  |> 
+      left_join(ssri_snri_data, by = c("ENROLID", "object", "days" ))  |> 
+      mutate(
+        nsaid_exposed = if_else(is.na(nsaid_exposed), 0, nsaid_exposed),
+        antiplatelet_exposed = if_else(is.na(antiplatelet_exposed), 0, antiplatelet_exposed),
+        other_anticoag_exposed = if_else(is.na(other_anticoag_exposed), 0, other_anticoag_exposed),
+        ssri_snri_exposed = if_else(is.na(ssri_snri_exposed), 0, ssri_snri_exposed)) 
+    
+    # Apply the function to create the binary indicator
+    df <- result_cov %>%
+      group_by(ENROLID) %>%
+      arrange(ENROLID, days) %>%
+      mutate(
+        nsaid_30 = rollapplyr(nsaid_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
+        antiplatelet_30 = rollapplyr(antiplatelet_exposed, width = 30, FUN = sum, fill = NA, align = "right"), 
+        other_anticoag_30 = rollapplyr(other_anticoag_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
+        ssri_snri_30 = rollapplyr(ssri_snri_exposed, width = 30, FUN = sum, fill = NA, align = "right")) %>%
+      mutate(
+        nsaid_30 = if_else(!is.na(nsaid_30) & nsaid_30 > 0, 1, 0),
+        antiplatelet_30 = if_else(!is.na(antiplatelet_30) & antiplatelet_30 > 0, 1, 0), 
+        other_anticoag_30 = if_else(!is.na(other_anticoag_30) & other_anticoag_30 > 0, 1, 0), 
+        ssri_snri_30 = if_else(!is.na(ssri_snri_30) & ssri_snri_30 > 0, 1, 0)) %>%
+      ungroup() |> 
+      mutate(
+        antiplatelet_30 = if_else(antiplatelet_exposed == 1, 1, antiplatelet_30),
+        nsaid_30 = if_else(nsaid_exposed == 1, 1, nsaid_30),
+        other_anticoag_30 = if_else(other_anticoag_exposed == 1, 1, other_anticoag_30),
+        ssri_snri_30 = if_else(ssri_snri_exposed == 1, 1, ssri_snri_30)) 
+    
+    df <- df %>%
+      mutate(offset = log(1))
+    
+    # Check for NA values in 'event' column before fitting the model
+    if (any(is.na(df$event))) {
+      stop("Missing values detected in 'event' column")
+    }
+    
+    # Determine model formula based on current precipitant
+    if (i %in% nsaids) {
+      model_formula <- event ~ exposed + antiplatelet_30 + other_anticoag_30 + ssri_snri_30
+    } else if (i %in% antiplatelet) {
+      model_formula <- event ~ exposed + nsaid_30 + other_anticoag_30 + ssri_snri_30
+    } else if (i %in% other_anticoag) {
+      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + ssri_snri_30
+    } else if (i %in% ssri_snri) {
+      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30
+    } else {
+      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + ssri_snri_30
+    }
+    
+    
+    # Fit the conditional Poisson regression model
+    df$ENROLID <- as.factor(df$ENROLID)
+    
+    # Exclude washout period and run the regression
+    df_no_washout <- df %>% filter(washout == 0)
+
+    model <- gnm(model_formula, eliminate = ENROLID, family = poisson(), data = df_no_washout)
+    model_summary <- summary(model)
+    
+    coefs <- coef(model_summary)
+    coefs_exp <- exp(coef(model))
+    confints_exp <- get_confints(model, "exposed")
+    
+    combined_df2 <- data.frame(
+      Estimate = coefs[1],
+      IRR = coefs_exp[1],
+      SE = summary(model)$coefficients[1, "Std. Error"],
+      z_value = summary(model)$coefficients[1, "z value"],
+      p_value = summary(model)$coefficients[1, "Pr(>|z|)"],
+      `Lower 95%` = confints_exp[1],
+      `Upper 95%` = confints_exp[2],
+      drug = i
+    )
+    
+    # Append to results table
+    results_table <- bind_rows(results_table, combined_df2)
+    
+  }, error = function(e) {
+    cat("ERROR with precipitant drug:", i, "\n", conditionMessage(e), "\n")
+    #stop(paste("Error occurred with precipitant drug:", i))
+  })
+}
+
+#Shinkage: 
+#Define the semi-Bayes shrinkage function
+semi_bayes_shrinkage <- function(log_rr, se, prior_mean_log = 0, prior_var_log = 0.25) {
+  # Calculate the precision (inverse of the variance)
+  prior_precision = 1 / prior_var_log
+  se_squared = se^2
+  precision = 1 / se_squared
+  
+  # Calculate the posterior mean and variance
+  post_precision = prior_precision + precision
+  post_mean_log = (prior_mean_log * prior_precision + log_rr * precision) / post_precision
+  post_var_log = 1 / post_precision
+  
+  # Calculate the shrunken log RR and confidence intervals
+  shrunken_log_rr = post_mean_log
+  lower_ci_log = post_mean_log - 1.96 * sqrt(post_var_log)
+  upper_ci_log = post_mean_log + 1.96 * sqrt(post_var_log)
+  
+  return(data.frame(shrunken_log_rr, lower_ci_log, upper_ci_log))
+}
+
+# Apply the semi-Bayes shrinkage function to the regression results
+shrinkage_results <- results_table %>%
+  rowwise() %>%
+  mutate(
+    shrinkage = list(semi_bayes_shrinkage(Estimate, SE)),
+    shrunken_log_rr = shrinkage$shrunken_log_rr,
+    lower_ci_log = shrinkage$lower_ci_log,
+    upper_ci_log = shrinkage$upper_ci_log,
+    shrunken_irr = exp(shrunken_log_rr),
+    lower_ci = exp(lower_ci_log),
+    upper_ci = exp(upper_ci_log)
+  ) %>%
+  select(-shrinkage) %>%
+  unnest(cols = c(shrunken_log_rr, lower_ci_log, upper_ci_log, shrunken_irr, lower_ci, upper_ci))
+
+# Isolate statistically significant variables (where CI does not include 1)
+significant_results <- shrinkage_results %>%
+  filter(lower_ci > 1 | upper_ci < 1)
+
+```
+
+
+```{r}
+# Function to merge overlapping intervals
+merge_intervals <- function(data) {
+  data <- data[order(data$day_exposure_start), ]
+  merged <- data[1, , drop = FALSE]
+  for (i in 2:nrow(data)) {
+    if (is.na(data$day_exposure_start[i]) || is.na(data$day_exposure_end[i])) {
+      next
+    }
+    if (data$day_exposure_start[i] <= merged$day_exposure_end[nrow(merged)] + 1) {
+      merged$day_exposure_end[nrow(merged)] <- max(merged$day_exposure_end[nrow(merged)], data$day_exposure_end[i], na.rm = TRUE)
+    } else {
+      merged <- rbind(merged, data[i, , drop = FALSE])
+    }
+  }
+  return(merged)
+}
+
+
+
+
+
+
+
+
+# Apply the function to each ENROLID precipitant group
+collapsed_df <- precipitant_cohort_9|>
+  mutate(day_obs_end = as.numeric(day_obs_end)) |> 
+  group_by(ENROLID, precipitant) |>
+  do(merge_intervals(.)) |>
+  ungroup() |> 
+  select(ENROLID, precipitant, object, day_obs_start, day_obs_end,day_exposure_start, day_exposure_end) |>
+  mutate(risk_window_start = if_else(day_obs_start >= day_exposure_start, day_obs_start, day_exposure_start)) |>
+  mutate(risk_window_end = if_else(day_obs_end <= day_exposure_end, day_obs_end, day_exposure_end)) 
+
+##Now, using this data, need to generate complete windows so unexposed periods are present. 
+
+
+# Generate complete windows
+generate_windows <- function(data) {
+  max_obs_end <- max(data$day_obs_end)
+  windows <- data.frame()
+  
+  for (i in 1:nrow(data)) {
+    if (i == 1 && data$risk_window_start[i] > 0) {
+      windows <- rbind(windows, data.frame(
+        ENROLID = data$ENROLID[i],
+        window_start = 0,
+        window_end = data$risk_window_start[i] - 1,
+        exposure = "Unexposed"
+      ))
+    }
+    
+    windows <- rbind(windows, data.frame(
+      ENROLID = data$ENROLID[i],
+      window_start = data$risk_window_start[i],
+      window_end = data$risk_window_end[i],
+      exposure = "Exposed"
+    ))
+    
+    if (i < nrow(data) && data$risk_window_end[i] < data$risk_window_start[i + 1] - 1) {
+      windows <- rbind(windows, data.frame(
+        ENROLID = data$ENROLID[i],
+        window_start = data$risk_window_end[i] + 1,
+        window_end = data$risk_window_start[i + 1] - 1,
+        exposure = "Unexposed"
+      ))
+    }
+  }
+  
+  if (data$risk_window_end[nrow(data)] < max_obs_end) {
+    windows <- rbind(windows, data.frame(
+      ENROLID = data$ENROLID[nrow(data)],
+      window_start = data$risk_window_end[nrow(data)] + 1,
+      window_end = max_obs_end,
+      exposure = "Unexposed"
+    ))
+  }
+  
+  return(windows)
+}
+
+# Apply the function to generate windows
+windows_df <- collapsed_df |>
+  group_by(ENROLID, precipitant) |>
+  do(generate_windows(.)) |>
+  ungroup()
+
+
+# Loop for DDI
+
+# ##Pre-test loop on one precipitant
+# precip3 <- precipitant_cohort_9 |> 
+#   select(ENROLID, object, precipitant) |> 
+#   distinct() |> 
+#   left_join(windows_df, by = c("ENROLID", "precipitant")) |> 
+#   filter(precipitant == "Levothyroxine Sodium") |> 
+#   mutate(exposure = if_else(exposure == "Exposed", 1, 0))
+# 
+# precip4 <- precip3 %>%
+#   left_join(dataset_for_loop_outcome, by = "ENROLID") %>%
+#   rowwise() %>%
+#   mutate(event_indicator = sum(c_across(starts_with("event_")) >= window_start & c_across(starts_with("event_")) <= window_end, na.rm = TRUE)) %>%
+#   ungroup() %>%
+#   mutate(event_indicator = replace_na(event_indicator, 0)) %>%
+#   select(ENROLID, object, precipitant, window_start, window_end, exposure, event_indicator) %>%
+#   mutate(time_at_risk = window_end - window_start + 1) %>%
+#   mutate(offset_term = log(time_at_risk))
+# 
+# # Step 1: Identify individuals with discordant exposure periods
+# discordant_individuals <- precip4 %>%
+#   group_by(ENROLID) %>%
+#   filter(n_distinct(exposure) > 1) %>%
+#   ungroup()
+# 
+# # Convert ENROLID to a factor
+# precip4$ENROLID <- as.factor(precip4$ENROLID)
+# 
+# # Fit the conditional Poisson regression model
+# model <- gnm(event_indicator ~ exposure + offset(offset_term), eliminate = ENROLID, family = poisson, data = precip4)
+# summary(model)
+
+
+
+###REVISED LOOP#####
+library(profvis)
+library(rstanarm)
+
+# Initialize the results tables
+results_table <- data.frame()
+
+for (i in precipitant_vector) {
+  tryCatch({
+
+ # Combine with original data
+    precip3 <- precipitant_cohort_9 |> 
+      select(ENROLID, object, precipitant) |> 
+      distinct() |> 
+      left_join(windows_df, by = c("ENROLID", "precipitant")) |> 
+      filter(precipitant == "Levothyroxine Sodium") |>  # Filter for the current precipitant
+      #filter(ENROLID == 133808601) |> 
+      mutate(exposure = if_else(exposure == "Exposed", 1, 0))
+
+    precip4 <- precip3 |> 
+      left_join(dataset_for_loop_outcome, by = "ENROLID") |> 
+      rowwise() |>
+      mutate(event_indicator = sum(c_across(starts_with("event_")) >= window_start & c_across(starts_with("event_")) <= window_end, na.rm = TRUE)) |> 
+      ungroup() |> 
+      mutate(event_indicator = replace_na(event_indicator, 0)) |> 
+      select(ENROLID, object, precipitant, window_start, window_end, exposure, event_indicator) |> 
+      mutate(time_at_risk = window_end - window_start + 1) |>
+      group_by(ENROLID, exposure) |> 
+      summarise(
+    time_at_risk = sum(time_at_risk),
+    event_indicator = sum(event_indicator),
+    .groups = 'drop'
+  ) %>%
+  mutate(offset_term = log(time_at_risk))
+    
+    # Convert ENROLID to a factor
+    precip4$ENROLID <- as.factor(precip4$ENROLID)
+    
+    precip3 |> 
+      arrange(ENROLID, window_start) |> 
+      filter(ENROLID == 326759001)
+
+# Fit the conditional Poisson regression model
+model_gnm <- gnm(event_indicator ~ exposure + offset(offset_term), 
+                 eliminate = ENROLID, 
+                 family = poisson(), 
+                 data = precip4)
+
+# Extract model summary
+model_summary_gnm <- summary(model_gnm)
+print(model_summary_gnm)
+    
+    
+    # Extract coefficients and related statistics
+    coefs <- coef(model_summary)
+    coefs_exp <- exp(coef(model))
+    confints <- confint(model)
+    confints_exp <- exp(confints)
+    
+    # Create a data frame for combined results
+    combined_df <- data.frame(
+      Estimate = coefs[1],
+      IRR = coefs_exp[1],
+      SE = coefs[2],
+      z_value = coefs[3],
+      p_value = coefs[4],
+      `Lower 95%` = confints_exp[1],
+      `Upper 95%` = confints_exp[2]),
+      drug = i, 
+      object_drug = oac
+    )
+
+    
+    # Append to results tables
+    results_table <- bind_rows(results_table, combined_df)
+
+  }, error=function(e) {
+    cat("ERROR :", conditionMessage(e), "\n")
+  })
+}
+
+# Combine results tables and adjust p-values
+# results_table3 <- bind_cols(results_table, results_table2$pr_z, results_table2$se_coef) |> janitor::clean_names()
+
+
+
+results_table <- results_table|> janitor::clean_names()
+
+adjusted_pval <- p.adjust(results_table$p_value, method = "fdr") |> as.data.frame() |> janitor::clean_names()
+
+full_results_table <- bind_cols(results_table, adjusted_pval) |> 
+  rename(adjusted_pval = p_adjust_results_table_p_value_method_fdr) |>
+  mutate(across(where(is.numeric), ~ round(.x, 4))) |> 
+  arrange(adjusted_pval)
+
+final_results_table <- bind_rows(final_results_table, full_results_table)
+}
+##TRY THIS MEGA LOOP
+# Initialize the final results table
+final_results_table <- data.frame()
+
+# Loop over each OAC
+for (oac in object_oac) {
+  cat("Processing OAC:", oac, "\n")
+
+##Left join object data to outcome data to duplicate person for each hosp (e.g., 1 pt w/ 3 hosp who filled 5 meds = 15 obs)
+analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma, by = "ENROLID") |> 
+  arrange(ENROLID, hospnum, ADMDATE) |> 
+  mutate(day_obs_start = 0) |> 
+  mutate(day_obs_end = obj_period_end - index_date) |> 
+  mutate(day_of_event = ADMDATE - index_date) |> 
+  mutate(event_occur_outside_obs = ADMDATE < index_date | ADMDATE > obj_period_end) |> 
+  filter(event_occur_outside_obs==FALSE) |>  #17103 (all doac); 5767 obs
+  filter(GENNME == oac) |> 
+  mutate(object = GENNME) |> 
+  select(c(-GENNME, -event_occur_outside_obs)) #7342 apix; 1943 apix; 1790 rivaroxaban; 1518 apixaban
+
+ids_for_loop <- unique(analytic_cohort_oac$ENROLID)
+
+dataset_for_loop <- analytic_cohort_oac |> 
+  arrange(ENROLID, ADMDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE) |> 
+  select(ENROLID, index_date, obj_period_end, day_obs_start, day_obs_end, object)
+
+dataset_for_loop_outcome <- analytic_cohort_oac |> 
+  arrange(ENROLID, ADMDATE) |> 
+  select(ENROLID, day_of_event) |> 
+  distinct() |> #10 duplicates (i.e., multiple events same day)
+  group_by(ENROLID) |>
+  mutate(event_number = row_number()) |>
+  ungroup() |> 
+  pivot_wider(
+    id_cols = ENROLID, 
+    names_from = event_number, 
+    values_from = day_of_event,
+    names_prefix = "event_"
+  )
+
+
+#Precipitant List Generation
+
+
+#Create a list of precipitant drugs that are filled during the object window for each person
+
+#Step 1: Isolate ENROLIDs and retain index date and stop date (i.e., obj period end)
+precipitant_cohort <- analytic_cohort_oac |> 
+  arrange(ENROLID, ADMDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE) |>  
+  select(ENROLID, object, index_date, obj_period_end)
+
+#Join ENROLID with entire drug data file to pull in Rx history. Filter for drugs used in obj_wind
+precipitant_cohort_2 <- left_join(precipitant_cohort, all_drug_2009_2021, by = "ENROLID") |> #595155
+  arrange(ENROLID, SVCDATE) |> 
+  mutate(precip_start = SVCDATE) |> 
+  mutate(precip_end = SVCDATE + DAYSUPP) |> 
+  mutate(
+    concom = if_else(
+      (precip_start <= obj_period_end & precip_end >= index_date), 1, 0
+    )) |> 
+  filter(concom ==1) |> 
+  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object_oac, collapse = "|")))) |> 
+  filter(doac ==FALSE) |> 
+  select(-doac) 
+
+#Filter out the drugs from the exclusion list plus a few additional outliers
+precipitant_cohort_3 <- precipitant_cohort_2|> 
+  filter(!MASTFRM %in% excluded_mastfrm) |>
+  filter(!THRDTDS %in% excluded_thrdtds) |> 
+  filter(!str_detect(THRDTDS, "S/M")) |> 
+  filter(!GENNME %in% excluded_gennme)
+
+#Pull out the individual drugs. Split out combination products
+precipitant_active_ingredients <- precipitant_cohort_3 |> 
+  separate(GENNME, into = paste0("col", 1:10), sep = "/", fill = "right") |> 
+  pivot_longer(cols = starts_with("col"), names_to = "name", values_to = "GENNME", values_drop_na = TRUE, names_repair = "unique") |> 
+  separate(GENNME, into = paste0("drug", 1:10), sep = ";", fill = "right") |> 
+  pivot_longer(cols = starts_with("drug"), names_to = "name2", values_to = "GENNME", values_drop_na = TRUE, names_repair = "unique") |> 
+  filter(!is.na(GENNME)) |> 
+  select(ENROLID, GENNME)
+
+
+# Write the precipitants dataframe to an Excel file to allow manual renaming for mismatches
+#write.xlsx(precipitant_active_ingredient, file = "precipitant_active_ingredient.xlsx")
+
+# Created a mapping pathway for drugs used with ANY OAC. Read in here
+drug_mapping <- read_excel("drug_mapping.xlsx")
+
+#First use the mapping to correct names in the drug list 
+precipitant_active_ingredient_mapped <- precipitant_active_ingredients |> 
+  left_join(drug_mapping, by = "GENNME") |> 
+  mutate(GENNME = if_else(is.na(NEWNAME), GENNME, NEWNAME)) |> 
+  select(-NEWNAME)
+
+# Count unique ENROLID for each drug and limit drug list to those used among 5+ unique people
+drug_counts <- precipitant_active_ingredient_mapped %>%
+  group_by(GENNME) %>%
+  summarise(unique_enrolid_count = n_distinct(ENROLID)) |> 
+  filter(unique_enrolid_count > 4)
+
+# Save as a vector for future use in a loop
+precipitant_vector <- unique(drug_counts$GENNME)
+
+#Next use the mapping to correct names in the precipitant dataset. 
+##First derive function
+replace_drug_names_in_string <- function(drug_string, mapping) {
+  for (i in 1:nrow(mapping)) {
+    drug_string <- gsub(mapping$GENNME[i], mapping$NEWNAME[i], drug_string, fixed = TRUE)
+  }
+  return(drug_string)
+}
+
+# Apply the function to the GENNME column in the main dataset
+precipitant_cohort_4 <- precipitant_cohort_3 %>%
+  arrange(ENROLID, SVCDATE) |>
+  filter(!is.na(AGE)) |> 
+  filter(ENROLID %in% ids_for_loop) |> 
+  mutate(GENNME = sapply(GENNME, replace_drug_names_in_string, mapping = drug_mapping))
+
+# Modify cohort so have appropriate variable names for later
+precipitant_cohort_5 <- precipitant_cohort_4 |> 
+  mutate(pre_fill_end = SVCDATE + DAYSUPP + (DAYSUPP *0.2)) |>  
+  rename(expo_start_date = SVCDATE) |> 
+  rename(expo_end_date = pre_fill_end) |> 
+  rename(precipitant=GENNME)
+
+
+
+
+#Apply days' supply cleaning to precipitants
+
+
+precipitant_cohort_6 <- precipitant_cohort_5 |> 
+  group_by(ENROLID, precipitant) %>%
+  arrange(expo_start_date) %>%
+  mutate(negative_days_flag = DAYSUPP < 0, 
+         cancel_flag = FALSE,
+         days_to_closest_positive_claim = NA)
+
+# Identify pairs of positive and negative claims
+# Define a function to process each group
+process_group <- function(df) {
+  for (i in seq_len(nrow(df))) {
+    if (df$negative_days_flag[i]) {
+      # Get the current service date and days supply for the negative claim
+      svcdate <- df$expo_start_date[i]
+      daysupp_negative <- df$DAYSUPP[i]
+      
+      # Check for positive claims on the same day or within 15 days prior
+      positive_claims_15 <- df %>%
+        filter(
+          expo_start_date <= svcdate,
+          expo_start_date >= (svcdate - days(15)),
+          DAYSUPP > 0
+        )
+      
+      # Check for exact match positive claims within 60 days prior
+      exact_match_60 <- df %>%
+        filter(
+          expo_start_date <= svcdate,
+          expo_start_date >= (svcdate - days(60)),
+          DAYSUPP == abs(daysupp_negative)
+        )
+      
+      # If there are positive claims within 15 days, find the closest one
+      if (nrow(positive_claims_15) > 0) {
+        closest_positive_claim <- positive_claims_15 %>%
+          arrange(desc(expo_start_date)) %>%
+          slice(1)
+        
+        days_diff <- as.numeric(difftime(svcdate, closest_positive_claim$expo_start_date, units = "days"))
+        df$days_to_closest_positive_claim[i] <- days_diff
+        
+        # Set the cancel flag for both the negative and positive claims
+        df$cancel_flag[i] <- TRUE
+        df$cancel_flag[df$expo_start_date == closest_positive_claim$expo_start_date &
+                       df$DAYSUPP == closest_positive_claim$DAYSUPP] <- TRUE
+      }
+      
+      # If there are exact match positive claims within 60 days, find the closest one
+      if (nrow(exact_match_60) > 0) {
+        closest_positive_claim <- exact_match_60 %>%
+          arrange(desc(expo_start_date)) %>%
+          slice(1)
+        
+        # Set the cancel flag for both the negative and positive claims
+        df$cancel_flag[i] <- TRUE
+        df$cancel_flag[df$expo_start_date == closest_positive_claim$expo_start_date &
+                       df$DAYSUPP == closest_positive_claim$DAYSUPP] <- TRUE
+      }
+    }
+  }
+  return(df)
+}
+
+# Apply the function to each group
+precipitant_cohort_7 <- precipitant_cohort_6 %>%
+  group_by(ENROLID, precipitant) %>%
+  group_modify(~ process_group(.x)) %>%
+  ungroup()
+
+# Remove cancelled claims
+precipitant_cohort_8 <- precipitant_cohort_7 |>
+  filter(!cancel_flag & !negative_days_flag)
+
+
+# Precipitant loop
+
+
+
+
+
+
+##Creates days of exposure start and end, but it creates problems when there are negative ds
+precipitant_cohort_9 <- precipitant_cohort_8 |> 
+  select(ENROLID, precipitant, expo_start_date, expo_end_date) |> 
+  left_join(dataset_for_loop, by = "ENROLID") |> 
+  select(ENROLID, object, day_obs_start, day_obs_end, index_date, obj_period_end, precipitant, expo_start_date, expo_end_date) |> 
+  mutate(day_exposure_start = as.numeric(expo_start_date - index_date)) |> 
+  filter(day_exposure_start <= day_obs_end) |> 
+  mutate(day_exposure_end = as.numeric(expo_end_date - index_date)) |> 
+  filter(day_exposure_end >= 0)
+
+# Function to merge overlapping intervals
+merge_intervals <- function(data) {
+  data <- data[order(data$day_exposure_start), ]
+  merged <- data[1, , drop = FALSE]
+  for (i in 2:nrow(data)) {
+    if (is.na(data$day_exposure_start[i]) || is.na(data$day_exposure_end[i])) {
+      next
+    }
+    if (data$day_exposure_start[i] <= merged$day_exposure_end[nrow(merged)] + 1) {
+      merged$day_exposure_end[nrow(merged)] <- max(merged$day_exposure_end[nrow(merged)], data$day_exposure_end[i], na.rm = TRUE)
+    } else {
+      merged <- rbind(merged, data[i, , drop = FALSE])
+    }
+  }
+  return(merged)
+}
+
+# Apply the function to each ENROLID precipitant group
+collapsed_df <- precipitant_cohort_9|>
+  mutate(day_obs_end = as.numeric(day_obs_end)) |> 
+  group_by(ENROLID, precipitant) |>
+  do(merge_intervals(.)) |>
+  ungroup() |> 
+  select(ENROLID, precipitant, object, day_obs_start, day_obs_end,day_exposure_start, day_exposure_end) |>
+  mutate(risk_window_start = if_else(day_obs_start >= day_exposure_start, day_obs_start, day_exposure_start)) |>
+  mutate(risk_window_end = if_else(day_obs_end <= day_exposure_end, day_obs_end, day_exposure_end)) 
+
+##Now, using this data, need to generate complete windows so unexposed periods are present. 
+
+
+# Generate complete windows
+generate_windows <- function(data) {
+  max_obs_end <- max(data$day_obs_end)
+  windows <- data.frame()
+  
+  for (i in 1:nrow(data)) {
+    if (i == 1 && data$risk_window_start[i] > 0) {
+      windows <- rbind(windows, data.frame(
+        ENROLID = data$ENROLID[i],
+        window_start = 0,
+        window_end = data$risk_window_start[i] - 1,
+        exposure = "Unexposed"
+      ))
+    }
+    
+    windows <- rbind(windows, data.frame(
+      ENROLID = data$ENROLID[i],
+      window_start = data$risk_window_start[i],
+      window_end = data$risk_window_end[i],
+      exposure = "Exposed"
+    ))
+    
+    if (i < nrow(data) && data$risk_window_end[i] < data$risk_window_start[i + 1] - 1) {
+      windows <- rbind(windows, data.frame(
+        ENROLID = data$ENROLID[i],
+        window_start = data$risk_window_end[i] + 1,
+        window_end = data$risk_window_start[i + 1] - 1,
+        exposure = "Unexposed"
+      ))
+    }
+  }
+  
+  if (data$risk_window_end[nrow(data)] < max_obs_end) {
+    windows <- rbind(windows, data.frame(
+      ENROLID = data$ENROLID[nrow(data)],
+      window_start = data$risk_window_end[nrow(data)] + 1,
+      window_end = max_obs_end,
+      exposure = "Unexposed"
+    ))
+  }
+  
+  return(windows)
+}
+
+# Apply the function to generate windows
+windows_df <- collapsed_df |>
+  group_by(ENROLID, precipitant) |>
+  do(generate_windows(.)) |>
+  ungroup()
+
+
+# Loop for DDI
+
+# ##Pre-test loop on one precipitant
+# precip3 <- precipitant_cohort_9 |> 
+#   select(ENROLID, object, precipitant) |> 
+#   distinct() |> 
+#   left_join(windows_df, by = c("ENROLID", "precipitant")) |> 
+#   filter(precipitant == "Levothyroxine Sodium") |> 
+#   mutate(exposure = if_else(exposure == "Exposed", 1, 0))
+# 
+# precip4 <- precip3 %>%
+#   left_join(dataset_for_loop_outcome, by = "ENROLID") %>%
+#   rowwise() %>%
+#   mutate(event_indicator = sum(c_across(starts_with("event_")) >= window_start & c_across(starts_with("event_")) <= window_end, na.rm = TRUE)) %>%
+#   ungroup() %>%
+#   mutate(event_indicator = replace_na(event_indicator, 0)) %>%
+#   select(ENROLID, object, precipitant, window_start, window_end, exposure, event_indicator) %>%
+#   mutate(time_at_risk = window_end - window_start + 1) %>%
+#   mutate(offset_term = log(time_at_risk))
+# 
+# # Step 1: Identify individuals with discordant exposure periods
+# discordant_individuals <- precip4 %>%
+#   group_by(ENROLID) %>%
+#   filter(n_distinct(exposure) > 1) %>%
+#   ungroup()
+# 
+# # Convert ENROLID to a factor
+# precip4$ENROLID <- as.factor(precip4$ENROLID)
+# 
+# # Fit the conditional Poisson regression model
+# model <- gnm(event_indicator ~ exposure + offset(offset_term), eliminate = ENROLID, family = poisson, data = precip4)
+# summary(model)
+
+
+
+###REVISED LOOP#####
+library(profvis)
+library(rstanarm)
+
+# Initialize the results tables
+results_table <- data.frame()
+
+for (i in precipitant_vector) {
+  tryCatch({
+
+ # Combine with original data
+    precip3 <- precipitant_cohort_9 |> 
+      select(ENROLID, object, precipitant) |> 
+      distinct() |> 
+      left_join(windows_df, by = c("ENROLID", "precipitant")) |> 
+      filter(precipitant == i) |>  # Filter for the current precipitant
+      mutate(exposure = if_else(exposure == "Exposed", 1, 0))
+
+    precip4 <- precip3 |> 
+      left_join(dataset_for_loop_outcome, by = "ENROLID") |> 
+      rowwise() |>
+      mutate(event_indicator = sum(c_across(starts_with("event_")) >= window_start & c_across(starts_with("event_")) <= window_end, na.rm = TRUE)) |> 
+      ungroup() |> 
+      mutate(event_indicator = replace_na(event_indicator, 0)) |> 
+      select(ENROLID, object, precipitant, window_start, window_end, exposure, event_indicator) |> 
+      mutate(time_at_risk = window_end - window_start + 1) |>
+      mutate(offset_term = log(time_at_risk))
+    
+    # Convert ENROLID to a factor
+    precip4$ENROLID <- as.factor(precip4$ENROLID)
+
+    # Fit the conditional Poisson regression model
+    model <- gnm(event_indicator ~ exposure + offset(offset_term), eliminate = ENROLID, family = poisson, data = precip4)
+
+    # Extract model summary
+    model_summary <- summary(model)
+    
+    # Extract coefficients and related statistics
+    coefs <- coef(model_summary)
+    coefs_exp <- exp(coef(model))
+    confints <- confint(model)
+    confints_exp <- exp(confints)
+    
+    # Create a data frame for combined results
+    combined_df <- data.frame(
+      Estimate = coefs[1],
+      IRR = coefs_exp[1],
+      SE = coefs[2],
+      z_value = coefs[3],
+      p_value = coefs[4],
+      `Lower 95%` = confints_exp[1],
+      `Upper 95%` = confints_exp[2],
+      drug = i, 
+      object_drug = oac
+    )
+
+    
+    # Append to results tables
+    results_table <- bind_rows(results_table, combined_df)
+
+  }, error=function(e) {
+    cat("ERROR :", conditionMessage(e), "\n")
+  })
+}
+
+# Combine results tables and adjust p-values
+# results_table3 <- bind_cols(results_table, results_table2$pr_z, results_table2$se_coef) |> janitor::clean_names()
+
+
+
+results_table <- results_table|> janitor::clean_names()
+
+adjusted_pval <- p.adjust(results_table$p_value, method = "fdr") |> as.data.frame() |> janitor::clean_names()
+
+full_results_table <- bind_cols(results_table, adjusted_pval) |> 
+  rename(adjusted_pval = p_adjust_results_table_p_value_method_fdr) |>
+  mutate(across(where(is.numeric), ~ round(.x, 4))) |> 
+  arrange(adjusted_pval)
+
+final_results_table <- bind_rows(final_results_table, full_results_table)
+}
+
+```
+
