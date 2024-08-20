@@ -125,7 +125,9 @@ cleaned_drug_data_3 <- cleaned_drug_data_2 %>%
   group_by(ENROLID) |> 
   mutate(first_days_supply = first(DAYSUPP)) |> 
   ungroup() |> 
-  filter(first_days_supply >=7) #2266420 unique obs
+  filter(first_days_supply >=7) |> #2266420 unique obs
+  select(-NDCNUM) |> 
+  distinct() # this should remove instances where same med is filled on same day for same quantity (not removed in step above)
 
 ```
 
@@ -164,14 +166,59 @@ all_drug_index <- all_drug_index |>
 all_drug_index_ids <- unique(all_drug_index$ENROLID) #1887759
 ```
 
+# Testing to develop re-entry criteria
+```{r}
+test_1 <- all_drug_index |> 
+  arrange(ENROLID, SVCDATE) |> 
+  group_by(ENROLID) |> 
+  mutate(
+    days_since_last = as.numeric(SVCDATE - lag(SVCDATE, default = first(SVCDATE))), 
+    gap_flag = if_else(is.na(days_since_last) | days_since_last > 183, 1, 0),  # Flag gaps greater than 6 months
+    episode_number = cumsum(gap_flag)  # Create a new episode number for each gap period
+  ) |> 
+  ungroup()
+
+# Assign a new index date for each episode (first SVCDATE in each episode)
+test_2 <- test_1 |> 
+  group_by(ENROLID, episode_number) |> 
+  mutate(
+    index_date_2 = min(SVCDATE),  # Assign the first SVCDATE of each episode as the index date
+    age_at_index_2 = first(AGE),  # Capture age at the first SVCDATE of the episode
+    index_med_2 = if_else(SVCDATE == index_date_2, GENNME, NA)  # Index medication for the episode
+  ) |> 
+  fill(index_med_2, .direction = "down") |>  # Fill down the index medication for the episode
+  ungroup()
+
+# Filter to ensure inclusion criteria are met for each episode
+test_3 <- test_2 |> 
+  filter(
+    index_date > '2009-07-02',   # Ensure index date is after July 2, 2009
+    !is.na(age_at_index),        # Remove if age is missing at index
+    age_at_index >= 18           # Ensure age is at least 18 at the index date
+  )
+
+# Track switches within each episode and handle subsequent re-entries
+test_4 <- test_3 |> 
+  mutate(doac_switch = if_else(GENNME == index_med, "match", "switch")) |> 
+  group_by(ENROLID, episode_number) |> 
+  mutate(
+    re_entry_flag = if_else(episode_number > 0, TRUE, FALSE)  # Mark if the patient has re-entered the study in a new episode
+  ) |> 
+  ungroup()
+
+test_4 |> 
+  filter(episode_number ==0) |> 
+  distinct(ENROLID)
+```
+
 
 ## Continuous enrollment (183 days pre-index)
 
 ```{r}
 #Write parquet file for patients 18+ with index date and ENROLID for CE assessment
-all_drug_index |>
-  arrange(ENROLID, index_date) |> 
-  select(ENROLID, index_date) |> 
+test_4 |>
+  arrange(ENROLID, index_date_2) |> 
+  select(ENROLID, index_date_2) |> 
   distinct() |> 
   write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
 
@@ -205,11 +252,12 @@ continuous_enrollment_result <- ContinuousEnrollment(
     days_after = 0,
     days_before = 183,
     max_gap = 0,
-    index_date_var = index_date
+    index_date_var = index_date_2
 ) #47837 obs 
 
 #Save ids with ce as vector
 ids_with_ce <- unique(continuous_enrollment_result$ENROLID) #1298505 (30% drop)
+
 
 
 ```
@@ -402,15 +450,15 @@ outcome_vec <- unique(all_inpatient_bleed_no_trauma$ENROLID) #57065
 #Test for days between fills
 ```{r}
 #Evaluate days between fills by drug to get avg. this will be rough and be goofy if people switch and then switch back
-days_between_fills <- all_drug_index %>%
+days_between_fills <- test_4 %>%
   filter(ENROLID %in% outcome_vec) |> 
   group_by(ENROLID, GENNME) %>%
-  arrange(ENROLID, GENNME, SVCDATE) %>%
+  arrange(ENROLID, GENNME, SVCDATE, episode_number) %>%
   mutate(
     # Calculate the days between the current fill and the previous fill
     days_between_fills = as.numeric(difftime(SVCDATE, lag(SVCDATE), units = "days")) - lag(DAYSUPP),
     # Adjust for overlapping fills (set negative values to zero)
-    days_between_fills = ifelse(days_between_fills < 0, 0, days_between_fills)
+    days_between_fills = if_else(days_between_fills < 0, 0, days_between_fills)
   ) %>%
   # Remove the first row of each group (since lag creates an NA for the first row)
   filter(!is.na(days_between_fills)) %>%
@@ -439,21 +487,21 @@ ggplot(days_between_fills, aes(x = days_between_fills)) +
 
 ##Need to take out from switches on down. Switches is messing things up. 
 
-oac_cohort <- all_drug_index |> 
+oac_cohort <- test_4 |> 
   filter(ENROLID %in% outcome_vec) #57065
 
 all_drug_index_continuous <- oac_cohort |> 
   mutate(obj_fill_end = SVCDATE + DAYSUPP + DAYSUPP * 0.2) |>  #7d grace (Zhou 2020); assuming 80% adherence here; removed + (DAYSUPP *0.2) based on recent paper by leonard on grace periods
-  mutate(oac_switch = if_else(GENNME != index_med, "switch", NA)) |>
-  group_by(ENROLID) |> 
+  group_by(ENROLID, episode_number) |> 
+  mutate(oac_switch = if_else(GENNME != index_med_2, "switch", NA)) |>
   fill(oac_switch, .direction = "down") |> 
   mutate(obj_end_lagged = lag(obj_fill_end)) |> 
-  ungroup() |> 
+  #ungroup() |> 
   mutate(
     cont_expo1 = ifelse(SVCDATE <= obj_end_lagged, "Continuous", "New" ),  #Flag if next fill falls outside grace period
     cont_expo2 = ifelse(is.na(cont_expo1), "New", cont_expo1),  #Change first fill values (currently NA) to "New"
     censor = ifelse(cont_expo1=="New" & cont_expo2 == "New", 1, NA)) |>   #Filter if "New", "New". Should only occur if new start that isnt first fill
-  group_by(ENROLID) |> 
+ # group_by(ENROLID) |> 
   fill(censor)  |>  #Fills down the censored variables for filtering; 243201
   ungroup() |> 
   filter(is.na(censor)) |>  #148709
@@ -461,13 +509,15 @@ all_drug_index_continuous <- oac_cohort |>
 
 ##Create cohort of oac users
 oac_users <- all_drug_index_continuous |> 
-  group_by(ENROLID) |> 
+  group_by(ENROLID, episode_number) |> 
   mutate(obj_period_end = max(obj_fill_end)) |> 
   ungroup() |> 
-  select(ENROLID, GENNME, age_at_index, SEX, index_date, obj_period_end) |> 
-  distinct(ENROLID, .keep_all = TRUE) #57065 
+  select(ENROLID, GENNME, age_at_index_2, SEX, index_date_2, obj_period_end, episode_number)  |> 
+  distinct(ENROLID, episode_number, .keep_all = TRUE) #57065 
 
 oac_user_ids <- unique(oac_users$ENROLID)
+
+
 ```
 
 
@@ -485,23 +535,25 @@ disenrollment_data <- all_enroll |>
     GapDays = as.integer(DTSTART - PreviousEndDate)) |>  # Get prior DTEND and calculate gap between DTSTART
   ungroup() |> 
   left_join(oac_users, by = "ENROLID") |> #Join with dataset w/ observation start time
-  group_by(ENROLID) |> 
-  mutate(flag = if_else(DTSTART < index_date - 30, 1, 0)) |> #Creates flag to identify if DTSTART is 30 days before index. If so its assigned value of 1
+  group_by(ENROLID, episode_number) |> 
+  mutate(flag = if_else(DTSTART < index_date_2 - 30, 1, 0)) |> #Creates flag to identify if DTSTART is 30 days before index. If so its assigned value of 1
   filter(flag == 0) |> # filters those patients out
   mutate(
-    censor_dt = if_else(GapDays > 30 & PreviousEndDate > index_date, 1, 0),  #Creates censoring variable gap >30d & prior end date is after index
+    censor_dt = if_else(GapDays > 30 & PreviousEndDate > index_date_2, 1, 0),  #Creates censoring variable gap >30d & prior end date is after index
     censor_dt = cummax(censor_dt) # Propagate the censor flag to all subsequent rows
   ) |> 
   filter(censor_dt == 0) |> 
   mutate(lost_ce_dt = max(DTEND)) |> #Use max date populate all rows with day of disenrollment
   ungroup() |> 
-  distinct(ENROLID, index_date, obj_period_end, lost_ce_dt) |> 
+  distinct(ENROLID, index_date_2, obj_period_end, lost_ce_dt, episode_number) |> 
+  group_by(ENROLID, episode_number) |> 
   mutate(new_obj_period_end = pmin(lost_ce_dt, obj_period_end, na.rm = TRUE)) |> 
-  select(ENROLID, new_obj_period_end)
+  ungroup() |> 
+  select(ENROLID, episode_number, new_obj_period_end)
 
 #Join back with dataset and update obj_period_end variable
 cohort_oac_users_with_ce_update <- oac_users |> 
-  left_join(disenrollment_data, by = "ENROLID") |> 
+  left_join(disenrollment_data, by = c("ENROLID", "episode_number")) |> 
   select(-obj_period_end) |> 
   rename(obj_period_end = new_obj_period_end)
 
@@ -511,36 +563,55 @@ cohort_oac_users_with_ce_update |> distinct(ENROLID) #57065
 
 
 ```{r}
-##Left join object data to outcome data to duplicate person for each hosp (e.g., 1 pt w/ 3 hosp who filled 5 meds = 15 obs)
-analytic_cohort_oac <- left_join(test, ccae_bleed_outcome_no_trauma, by = "ENROLID") |> 
-  arrange(ENROLID, hospnum, ADMDATE) |> 
-  mutate(day_obs_start = 0) |> 
-  mutate(day_obs_end = obj_period_end - index_date) |> 
-  mutate(day_of_event = ADMDATE - index_date) |> 
-  mutate(event_occur_outside_obs = ADMDATE < index_date | ADMDATE > obj_period_end) |> 
-  filter(event_occur_outside_obs==FALSE) |>  #17103 (all doac); 5767 obs
-  filter(GENNME == "Apixaban") |> #Toggle for loop. change to oac to run
-  mutate(object = GENNME) |> 
-  select(c(-GENNME, -event_occur_outside_obs)) #7342 apix; 1943 apix; 1790 rivaroxaban; 1518 apixaban
-
 analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
-  arrange(ENROLID, ADMDATE) |> 
+  arrange(ENROLID, ADMDATE, episode_number) |> 
   mutate(day_obs_start = 0) |> 
-  mutate(day_obs_end = obj_period_end - index_date) |> 
-  mutate(day_of_event = ADMDATE - index_date) |> 
-  mutate(event_occur_outside_obs = ADMDATE < index_date | ADMDATE > obj_period_end) |> 
+  mutate(day_obs_end = obj_period_end - index_date_2) |> 
+  mutate(day_of_event = ADMDATE - index_date_2) |> 
+  #mutate(event_occur_before_obs = ADMDATE < index_date) |> 
+  mutate(event_occur_outside_obs = ADMDATE < index_date_2 | ADMDATE > obj_period_end) |> 
   filter(event_occur_outside_obs==FALSE) |>  #17103 (all doac); 5767 obs
   mutate(object = GENNME) |> 
   select(c(-GENNME, -event_occur_outside_obs)) |> 
   mutate(age_group = case_when(
-    age_at_index >= 18 & age_at_index <= 44 ~ "18-44",
-    age_at_index >= 45 & age_at_index <= 64 ~ "45-64",
-    age_at_index >= 65 & age_at_index <= 74 ~ "65-74",
-    age_at_index >= 75 & age_at_index <= 84 ~ "75-84",
-    age_at_index >= 85 & age_at_index <= 90 ~ "85-90",
-    age_at_index > 90 ~ ">90",
+    age_at_index_2 >= 18 & age_at_index_2 <= 44 ~ "18-44",
+    age_at_index_2 >= 45 & age_at_index_2 <= 64 ~ "45-64",
+    age_at_index_2 >= 65 & age_at_index_2 <= 74 ~ "65-74",
+    age_at_index_2 >= 75 & age_at_index_2 <= 84 ~ "75-84",
+    age_at_index_2 >= 85 & age_at_index_2 <= 90 ~ "85-90",
+    age_at_index_2 > 90 ~ ">90",
     TRUE ~ "Other"
   ))
+
+
+#How many patients had an event before observation
+cohort_ids <- unique(analytic_cohort_oac$ENROLID)
+  
+event_before_obs_test <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
+  filter(ENROLID %in% cohort_ids) |> 
+  arrange(ENROLID, ADMDATE) |> 
+  mutate(day_obs_start = 0) |> 
+  mutate(day_obs_end = obj_period_end - index_date) |> 
+  mutate(day_of_event = ADMDATE - index_date) |> 
+  mutate(event_occur_before_obs = ADMDATE < index_date) 
+
+event_before_obs_test |> distinct(ENROLID) #9812
+event_before_obs_test |> filter(event_occur_before_obs == TRUE) |> distinct(ENROLID) #633 had prior event
+
+# Count the number of events before the index date for each ENROLID
+event_count_before_index <- event_before_obs_test |> 
+  filter(event_occur_before_obs == TRUE) |>  # Only include events before the index date
+  group_by(ENROLID) |> 
+  summarise(event_count = n()) |>  # Count the number of events before the index date
+  ungroup()
+
+# Calculate the proportions
+event_proportions <- event_count_before_index |> 
+  group_by(event_count) |> 
+  summarise(patient_count = n()) |>  # Count how many patients had each number of events
+  mutate(proportion = patient_count / sum(patient_count)) |>  # Calculate the proportion
+  arrange(event_count)  # Arrange by the number of events
+
 ```
 
 #Build Table 1
@@ -623,11 +694,12 @@ final_results_table <- data.frame()
 analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
   arrange(ENROLID, ADMDATE) |> 
   mutate(day_obs_start = 0) |> 
-  mutate(day_obs_end = obj_period_end - index_date) |> 
-  mutate(day_of_event = ADMDATE - index_date) |> 
-  mutate(event_occur_outside_obs = ADMDATE < index_date | ADMDATE > obj_period_end) |> 
+  mutate(day_obs_end = obj_period_end - index_date_2) |> 
+  mutate(day_of_event = ADMDATE - index_date_2) |> 
+  mutate(event_occur_outside_obs = ADMDATE < index_date_2 | ADMDATE > obj_period_end) |> 
   filter(event_occur_outside_obs==FALSE) |>  #17103 (all doac); 9812 obs
   mutate(object = GENNME) |> 
+  filter(object == "Rivaroxaban") |> 
   select(c(-GENNME, -event_occur_outside_obs)) 
 
 
@@ -643,7 +715,7 @@ analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_
   mutate(day_of_event = ADMDATE - index_date) |> 
   mutate(event_occur_outside_obs = ADMDATE < index_date | ADMDATE > obj_period_end) |> 
   filter(event_occur_outside_obs==FALSE) |>  #9812 doac
-  filter(GENNME == "Apixaban") |> 
+  filter(GENNME == "Rivaroxaban") |> 
   mutate(object = GENNME) |> 
   select(c(-GENNME, -event_occur_outside_obs)) #7342 apix; 1943 apix; 1790 rivaroxaban; 1518 apixaban
 
@@ -652,17 +724,17 @@ ids_for_loop <- unique(analytic_cohort_oac$ENROLID)
 dataset_for_loop <- analytic_cohort_oac |> 
   arrange(ENROLID, ADMDATE) |> 
   distinct(ENROLID, .keep_all = TRUE) |> 
-  select(ENROLID, index_date, obj_period_end, day_obs_start, day_obs_end, object)
+  select(ENROLID, index_date_2, obj_period_end, day_obs_start, day_obs_end, object, episode_number)
 
 dataset_for_loop_outcome <- analytic_cohort_oac |> 
   arrange(ENROLID, ADMDATE) |> 
-  select(ENROLID, day_of_event) |> 
+  select(ENROLID, day_of_event, episode_number) |> 
   distinct() |> #10 duplicates (i.e., multiple events same day)
-  group_by(ENROLID) |>
+  group_by(ENROLID, episode_number) |>
   mutate(event_number = row_number()) |>
   ungroup() |> 
   pivot_wider(
-    id_cols = ENROLID, 
+    id_cols = c(ENROLID, episode_number),  
     names_from = event_number, 
     values_from = day_of_event,
     names_prefix = "event_"
@@ -701,8 +773,9 @@ all_drug_full <- rbind(ccaed_2009_2021_full, mdcrd_2009_2021_full)
 #Step 1: Isolate ENROLIDs and retain index date and stop date (i.e., obj period end)
 precipitant_cohort <- analytic_cohort_oac |> 
   arrange(ENROLID, ADMDATE) |> 
-  distinct(ENROLID, .keep_all = TRUE) |>  
-  select(ENROLID, object, index_date, obj_period_end)
+  distinct(ENROLID, episode_number, .keep_all = TRUE) |>  
+  select(ENROLID, object, index_date_2, obj_period_end, episode_number)
+
 
 #Join ENROLID with entire drug data file to pull in Rx history. Filter for drugs used in obj_wind
 precipitant_cohort_2 <- left_join(precipitant_cohort, all_drug_full, by = "ENROLID") |> #595155
@@ -711,7 +784,7 @@ precipitant_cohort_2 <- left_join(precipitant_cohort, all_drug_full, by = "ENROL
   mutate(precip_end = SVCDATE + DAYSUPP) |> 
   mutate(
     concom = if_else(
-      (precip_start <= obj_period_end & precip_end >= index_date), 1, 0
+      (precip_start <= obj_period_end & precip_end >= index_date_2), 1, 0
     )) |> 
   filter(concom ==1) |> 
   mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object_oac, collapse = "|")))) |> 
@@ -785,7 +858,7 @@ precipitant_cohort_5 <- precipitant_cohort_4 |>
 #Apply days' supply cleaning to precipitants
 precipitant_cohort_6 <- precipitant_cohort_5 %>%
   arrange(ENROLID, expo_start_date, DAYSUPP) |> 
-  group_by(ENROLID, expo_start_date, precipitant) %>%
+  group_by(ENROLID, episode_number, expo_start_date, precipitant) %>%
   mutate(absolute_daysupp = abs(DAYSUPP)) %>%
   filter(
     !(DAYSUPP < 0 & absolute_daysupp %in% DAYSUPP[DAYSUPP > 0]) &
@@ -796,7 +869,7 @@ precipitant_cohort_6 <- precipitant_cohort_5 %>%
 
 # Step 2: Remove sequential matching pairs within 15 days
 precipitant_cohort_7 <- precipitant_cohort_6 %>%
-  group_by(ENROLID, precipitant) %>%
+  group_by(ENROLID, episode_number, precipitant) %>%
   arrange(ENROLID, precipitant, expo_start_date) %>%
   mutate(
     next_svdate = lead(expo_start_date),
@@ -813,7 +886,7 @@ precipitant_cohort_7 <- precipitant_cohort_6 %>%
 
 #Select max value if multiple fills on same day. 
 precipitant_cohort_8 <- precipitant_cohort_7 %>%
-  group_by(ENROLID, expo_start_date, precipitant) %>%
+  group_by(ENROLID, episode_number, expo_start_date, precipitant) %>%
   filter(DAYSUPP == max(DAYSUPP, na.rm = TRUE)) %>%
   ungroup() 
 
@@ -821,18 +894,24 @@ precipitant_cohort_8 <- precipitant_cohort_7 %>%
 
 ##Creates days of exposure start and end, but it creates problems when there are negative ds
 precipitant_cohort_9 <- precipitant_cohort_8 |> 
-  select(ENROLID, precipitant, expo_start_date, expo_end_date) |> 
-  left_join(dataset_for_loop, by = "ENROLID") |> 
-  select(ENROLID, object, day_obs_start, day_obs_end, index_date, obj_period_end, precipitant, expo_start_date, expo_end_date) |> 
-  mutate(day_exposure_start = as.numeric(expo_start_date - index_date)) |> 
+  select(ENROLID, precipitant, expo_start_date, expo_end_date, episode_number) |> 
+  left_join(dataset_for_loop, by = c("ENROLID", "episode_number")) |> 
+  select(ENROLID, object, day_obs_start, day_obs_end, index_date_2, obj_period_end, precipitant, expo_start_date, expo_end_date, episode_number) |> 
+  mutate(day_exposure_start = as.numeric(expo_start_date - index_date_2)) |> 
   filter(day_exposure_start <= day_obs_end) |> 
-  mutate(day_exposure_end = as.numeric(expo_end_date - index_date)) |> 
+  mutate(day_exposure_end = as.numeric(expo_end_date - index_date_2)) |> 
   filter(day_exposure_end >= 0) |> 
   mutate(nsaid = if_any(precipitant, ~ str_detect(.x, paste(nsaids, collapse = "|")))) |> 
   mutate(antiplatelet = if_any(precipitant, ~ str_detect(.x, paste(antiplatelet, collapse = "|")))) |> 
   mutate(other_anticoag = if_any(precipitant, ~ str_detect(.x, paste(other_anticoag, collapse = "|")))) |>
   mutate(ssri_snri = if_any(precipitant, ~ str_detect(.x, paste(ssri_snri, collapse = "|")))) |>
-  arrange(ENROLID, day_obs_start)
+  mutate(giprotect = if_any(precipitant, ~ str_detect(.x, paste(giprotect, collapse = "|")))) |>
+  arrange(ENROLID, day_obs_start) |> 
+  #filter(episode_number == 0) |> 
+  mutate(ENROLID = paste0(ENROLID, "_", episode_number)) |> 
+  select(-episode_number)
+
+precipitant_cohort_9 |> distinct(ENROLID)
 
 ##Add in covariates for nsaid and antiplatelet use
 nsaid_data <- precipitant_cohort_9 |> 
@@ -840,7 +919,7 @@ nsaid_data <- precipitant_cohort_9 |>
   rowwise() %>%
   mutate(days = list(day_obs_start:day_obs_end)) %>%
   unnest(cols = c(days)) |> 
-  group_by(ENROLID, days) %>%
+  group_by(ENROLID,  days) %>%
   mutate(
     nsaid_exposed = if_else(
       any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
@@ -859,38 +938,54 @@ antiplatelet_data <- precipitant_cohort_9 |>
       any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
     ) %>%
   ungroup() |> 
-  distinct(ENROLID, object, days, antiplatelet_exposed)
+  distinct(ENROLID,  object, days, antiplatelet_exposed)
 
 other_anticoag_data <- precipitant_cohort_9 |> 
   filter(other_anticoag == TRUE) |> 
   rowwise() %>%
   mutate(days = list(day_obs_start:day_obs_end)) %>%
   unnest(cols = c(days)) |> 
-  group_by(ENROLID, days) %>%
+  group_by(ENROLID,  days) %>%
   mutate(
     other_anticoag_exposed = if_else(
       any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
     ) %>%
   ungroup() |> 
-  distinct(ENROLID, object, days, other_anticoag_exposed)
+  distinct(ENROLID,  object, days, other_anticoag_exposed)
 
 ssri_snri_data <- precipitant_cohort_9 |> 
   filter(ssri_snri == TRUE) |> 
   rowwise() %>%
   mutate(days = list(day_obs_start:day_obs_end)) %>%
   unnest(cols = c(days)) |> 
-  group_by(ENROLID, days) %>%
+  group_by(ENROLID,  days) %>%
   mutate(
     ssri_snri_exposed = if_else(
       any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
     ) %>%
   ungroup() |> 
-  distinct(ENROLID, object, days, ssri_snri_exposed)
+  distinct(ENROLID,  object, days, ssri_snri_exposed)
+
+giprotect_data <- precipitant_cohort_9 |> 
+  filter(giprotect == TRUE) |> 
+  rowwise() %>%
+  mutate(days = list(day_obs_start:day_obs_end)) %>%
+  unnest(cols = c(days)) |> 
+  group_by(ENROLID,  days) %>%
+  mutate(
+    giprotect_exposed = if_else(
+      any(days >= day_exposure_start & days <= day_exposure_end), 1, 0)
+    ) %>%
+  ungroup() |> 
+  distinct(ENROLID,  object, days, giprotect_exposed)
 
 
 # Initialize the results tables
 results_table <- data.frame()
 
+dataset_for_loop_outcome <- dataset_for_loop_outcome |> 
+  mutate(ENROLID = paste0(ENROLID, "_", episode_number)) |> 
+  select(-episode_number)
 
 # Function to expand the observation period and mark exposure
 # Define your function to expand the observation period and mark exposure
@@ -903,16 +998,18 @@ expand_and_mark_exposure <- function(data, precipitant_name) {
   
   # Mark exposure period
   long_data <- long_data %>%
-    group_by(ENROLID, days) %>%
+    group_by(ENROLID,  days) %>%
     mutate(
       exposed = if_else(precipitant == precipitant_name &
         any(days >= day_exposure_start & days <= day_exposure_end), 
         1, 0
       )
     ) %>%
-    distinct(ENROLID, object, days, exposed) %>%
+    distinct(ENROLID,  object, days, exposed) %>%
     ungroup()
   
+
+
   # Join with outcome data
   test <- long_data %>%
     left_join(dataset_for_loop_outcome, by = "ENROLID") %>%
@@ -957,6 +1054,7 @@ get_confints <- function(model, parm) {
 # Initialize the results tables
 results_table <- data.frame()
 
+#precipitant_vector <- "Levothyroxine Sodium"
 # Loop through each precipitant
 for (i in precipitant_vector) {
   tryCatch({
@@ -979,11 +1077,13 @@ for (i in precipitant_vector) {
       left_join(antiplatelet_data, by = c("ENROLID", "object", "days" ))  |> 
       left_join(other_anticoag_data, by = c("ENROLID", "object", "days" ))  |> 
       left_join(ssri_snri_data, by = c("ENROLID", "object", "days" ))  |> 
+      left_join(giprotect_data, by = c("ENROLID", "object", "days")) |> 
       mutate(
         nsaid_exposed = if_else(is.na(nsaid_exposed), 0, nsaid_exposed),
         antiplatelet_exposed = if_else(is.na(antiplatelet_exposed), 0, antiplatelet_exposed),
         other_anticoag_exposed = if_else(is.na(other_anticoag_exposed), 0, other_anticoag_exposed),
-        ssri_snri_exposed = if_else(is.na(ssri_snri_exposed), 0, ssri_snri_exposed)) 
+        ssri_snri_exposed = if_else(is.na(ssri_snri_exposed), 0, ssri_snri_exposed),
+        giprotect_exposed = if_else(is.na(giprotect_exposed), 0, giprotect_exposed)) 
     
     # Apply the function to create the binary indicator
     df <- result_cov %>%
@@ -993,18 +1093,21 @@ for (i in precipitant_vector) {
         nsaid_30 = rollapplyr(nsaid_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
         antiplatelet_30 = rollapplyr(antiplatelet_exposed, width = 30, FUN = sum, fill = NA, align = "right"), 
         other_anticoag_30 = rollapplyr(other_anticoag_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
-        ssri_snri_30 = rollapplyr(ssri_snri_exposed, width = 30, FUN = sum, fill = NA, align = "right")) %>%
+        ssri_snri_30 = rollapplyr(ssri_snri_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
+        giprotect_30 = rollapplyr(giprotect_exposed, width = 30, FUN = sum, fill = NA, align = "right")) %>%
       mutate(
         nsaid_30 = if_else(!is.na(nsaid_30) & nsaid_30 > 0, 1, 0),
         antiplatelet_30 = if_else(!is.na(antiplatelet_30) & antiplatelet_30 > 0, 1, 0), 
         other_anticoag_30 = if_else(!is.na(other_anticoag_30) & other_anticoag_30 > 0, 1, 0), 
-        ssri_snri_30 = if_else(!is.na(ssri_snri_30) & ssri_snri_30 > 0, 1, 0)) %>%
+        ssri_snri_30 = if_else(!is.na(ssri_snri_30) & ssri_snri_30 > 0, 1, 0),
+        giprotect_30 = if_else(!is.na(giprotect_30) & giprotect_30 > 0, 1, 0)) %>%
       ungroup() |> 
       mutate(
         antiplatelet_30 = if_else(antiplatelet_exposed == 1, 1, antiplatelet_30),
         nsaid_30 = if_else(nsaid_exposed == 1, 1, nsaid_30),
         other_anticoag_30 = if_else(other_anticoag_exposed == 1, 1, other_anticoag_30),
-        ssri_snri_30 = if_else(ssri_snri_exposed == 1, 1, ssri_snri_30)) 
+        ssri_snri_30 = if_else(ssri_snri_exposed == 1, 1, ssri_snri_30),
+        giprotect_30 = if_else(giprotect_exposed == 1, 1, giprotect_30)) 
     
     df <- df %>%
       mutate(offset = log(1))
@@ -1016,15 +1119,17 @@ for (i in precipitant_vector) {
     
     # Determine model formula based on current precipitant
     if (i %in% nsaids) {
-      model_formula <- event ~ exposed + antiplatelet_30 + other_anticoag_30 + ssri_snri_30
+      model_formula <- event ~ exposed + antiplatelet_30 + other_anticoag_30 + ssri_snri_30 + giprotect_30
     } else if (i %in% antiplatelet) {
-      model_formula <- event ~ exposed + nsaid_30 + other_anticoag_30 + ssri_snri_30
+      model_formula <- event ~ exposed + nsaid_30 + other_anticoag_30 + ssri_snri_30 + giprotect_30
     } else if (i %in% other_anticoag) {
-      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + ssri_snri_30
+      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + ssri_snri_30 + giprotect_30
     } else if (i %in% ssri_snri) {
-      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30
-    } else {
+      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + giprotect_30
+    } else if (i %in% giprotect) {
       model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + ssri_snri_30
+    } else {
+      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + ssri_snri_30 + giprotect_30
     }
     
     
