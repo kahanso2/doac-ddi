@@ -1,0 +1,136 @@
+---
+title: "Aim 3 Study Schematic"
+format: html
+editor: visual
+---
+
+
+## Study Design Figure
+
+```{r}
+library(ggplot2)
+library(ggforce)
+library(grid)
+library(pBrackets)
+library(RColorBrewer)
+
+# Define time points (days)
+data_start <- -365
+data_end <- 365
+index_date <- 0
+index_date_st <- -3
+index_date_end <- 3
+washout_wind_st <- -365
+washout_wind_end <- -3
+excl_wind_1_st <- -365
+excl_wind_1_end <- -3
+excl_wind_3_st <- -150
+excl_wind_3_end <- -3
+excl_wind_2_st <- -3
+excl_wind_2_end <- 3
+exp_assess_wind_st <- -14
+exp_assess_wind_end <- -3
+covar_assess_wind_1_st <- -365
+covar_assess_wind_1_end <- -3
+covar_assess_wind_2_st <- -3
+covar_assess_wind_2_end <- 3
+follow_up_wind_st <- 3
+follow_up_wind_end <- 300
+pddi_st <- 50
+pddi_end <- 250
+
+brewer.pal(n = 9, name = "Purples")
+
+# Define plot
+ggplot() + 
+  
+  #Data period: Create labeled line segment to show data start and end points
+  geom_segment(aes(x = data_start, xend = data_end, y = 1, yend = 1, color = "segment"), 
+               size = 2,  color = "black", lineend = "butt", linejoin = "mitre") + 
+  
+  geom_segment(aes(x = data_start, xend = data_start, y = 0.75, yend = 1.25, color = "segment"), 
+               size = 2,  color = "black", lineend = "butt", linejoin = "mitre") + 
+  
+  geom_segment(aes(x = data_end, xend = data_end, y = 0.75, yend = 1.25, color = "segment"), 
+               size = 2,  color = "black", lineend = "butt", linejoin = "mitre") + 
+  
+  geom_text(aes(x = data_start, y = 0.45, label = "Data Start\n(01/01/2010)"),
+            vjust = "center", hjust = "center", color = "black", size = 1.25) +
+  
+  geom_text(aes(x = data_end, y = 0.45, label = "Data End\n(12/31/2021)"),
+            vjust = "center", hjust = "center", color = "black", size = 1.25) +
+  
+  
+  #Cohort entry arrow
+   geom_text(aes(x = index_date, y = 10, label = "Cohort Entry Date\n(First Date of Concomitant Therapy)\nDay 0"),
+            vjust = "center", hjust = "center", color = "black", size = 2, fontface = "bold") +
+  geom_point() +
+   geom_segment(aes(x = index_date, y = 9, xend = index_date, yend = 1),
+               arrow = arrow(length = unit(0.1, "inches")),  # add arrow
+               size = 2, alpha = 1, color = "#aaaaaa")+
+  
+  #Washout window
+  geom_rect(aes(xmin = washout_wind_st, xmax = washout_wind_end,
+                ymin = 7.75, ymax = 8.75, fill = "Washout Window"), fill = "#6495ed",
+            alpha = 0.8) +
+  
+  geom_text(aes(x = washout_wind_st + (((washout_wind_end - washout_wind_st)/2)), y = 8.25, label = "Inclusion Assessment Window\n(No prior oral anticoagulant, 12 months cont. enrollment)\n Days [-365,-1]"), 
+            vjust = "center", hjust = "center", color = "black", size = 2, fontface = "bold") +
+  
+    #Exclusion Assessment Window 3
+  geom_rect(aes(xmin = excl_wind_3_st, xmax = excl_wind_3_end,
+                ymin = 6.50, ymax = 7.50, fill = "Exclusion Window"), fill = "#c1272d",
+            alpha = 0.8) +
+  
+  geom_text(aes(x = excl_wind_3_st+ (((excl_wind_3_end - excl_wind_3_st)/2)), y = 7, label = "Exclusion Assessment Window\n(History of bleed\nDays [-30,-1]"), 
+            vjust = "center", hjust = "center", color = "black", size = 2, fontface = "bold") +
+
+  #Exclusion Assessment Window 2
+  geom_rect(aes(xmin = excl_wind_2_st, xmax = excl_wind_2_end,
+                ymin = 5.25, ymax = 6.25, fill = "Exclusion Window2"), fill = "#c1272d",
+            alpha = 0.8) +
+  
+  geom_text(aes(x = excl_wind_1_st+ ((excl_wind_1_end - excl_wind_1_st - 10)), y = 5.75, label = "Exclusion Assessment Window\n(Age <18)\n Days [0,0]"), 
+            vjust = "center", hjust = "right", color = "black", size = 2, fontface = "bold") +
+
+  #Covariate Assessment Window 1
+  geom_rect(aes(xmin = covar_assess_wind_1_st, xmax = covar_assess_wind_1_end,
+                ymin = 4, ymax = 5, fill = "Covariate Window 1"), fill = "#008176",
+            alpha = 0.8) +
+  
+  geom_text(aes(x = covar_assess_wind_1_st + (((covar_assess_wind_1_end - covar_assess_wind_1_st)/2)), y = 4.5, label = "Covariate Assessment Window\n(Baseline conditions, prior medication use)\nDays [-365,-1]"), 
+            vjust = "center", hjust = "center", color = "black", size = 2, fontface = "bold") +
+
+  #Covariate Assessment Window 2
+  geom_rect(aes(xmin = covar_assess_wind_2_st, xmax = covar_assess_wind_2_end,
+                ymin = 2.75, ymax = 3.75, fill = "Covariate Window 2"), fill = "#008176",
+            alpha = 0.8) +
+  
+  geom_text(aes(x = covar_assess_wind_2_st + ((covar_assess_wind_2_end - covar_assess_wind_2_st - 15)), y = 3.25, label = "Covariate Assessment Window\n(Demographic characteristics, cohort entry year)\nDays [0,0]"), 
+            vjust = "center", hjust = "right", color = "black", size = 2, fontface = "bold") +
+
+  #Follow-up Window
+  geom_rect(aes(xmin = follow_up_wind_st, xmax = follow_up_wind_end,
+                ymin = 1.5, ymax = 2.5, fill = "Follow-up Window\nDays [0, End of Follow-up*]"),
+            alpha = 0.8, fill = "#eecc16") +
+    
+  geom_text(aes(x = follow_up_wind_st + (((follow_up_wind_end - follow_up_wind_st)/2)), y = 2.0, label = "Follow-up Window\n(Exposed to OAC)\nDays [0, End of Follow-up*]"), 
+            vjust = "center", hjust = "center", color = "black", size = 2, fontface = "bold") +
+  
+
+  
+  #Remove gridlines and axes
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),# remove gridlines
+        axis.line = element_blank(),
+        axis.title = element_blank(),# remove axes
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+
+  geom_text(aes(x = data_start, y = -0.3, label = "*Censored at earliest of object or precipitant discontinuation, plan disenrollment, or end of data"), hjust = "left", color = "black", size = 1.25)
+
+ggsave("C:/Users/kahanso2/Documents/doac-ddi/study_schematic_aim3.png")
+ 
+
+```

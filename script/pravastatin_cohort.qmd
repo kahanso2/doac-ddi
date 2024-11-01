@@ -5,11 +5,8 @@ format: html
 editor: visual
 ---
 
-#To Do
+#To Do Need to redfine washout periods & grace period Need to plug in control (pravastatin) somehow
 
-Talked to Todd - we are going to expand inclusion criteria so that so long as >183 days without OAC use and 18+ at index then we will allow in study. That means, if someone had OAC use (but no event) on 1/1/2000 and then had a 1 year gap, started OAC, and had event, then they are in the study. We will only take the first instance of this for a person so they cannot contribute multiple times to the analysis. 
-
-Look at resources folder for papers used to support this work
 # About
 
 The goal of this analysis is to explore DDI in CVD using the SCCS as a high-throughput screening technique
@@ -29,35 +26,32 @@ source(here("codes/codes.R"))
 redbook <- open_dataset("//pharm-psop/Truven Data/Truven Data R/redbook.parquet") |> 
   collect()
 
-options(scipen = 999)
 ```
 
 # Drug Data
 
 ```{r}
-# Retrieve NDCs for OAC drugs
-oac_drug_list <- c("Warf", "Apix", "Rivarox", "Dabig", "Edoxa")
-oac_ndc <- map(oac_drug_list, get_ndc_by_drug_name) |> unlist()
+# Retrieve NDCs for pravastatin using get_ndc_by_drug_name function
+pravastatin_ndc <- get_ndc_by_drug_name("^Pravastatin Sodium") #need wildcard to exclude aspirin;pravastatin
 
 # Process ccae & mdcr datasets using extract_oac_drug_data function
-ccaed_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021.parquet", ndc_filter = oac_ndc)
+ccaed_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021_pravastatin.parquet", ndc_filter = pravastatin_ndc)
 
-mdcrd_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021.parquet", ndc_filter = oac_ndc)
+mdcrd_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021_pravastatin.parquet", ndc_filter = pravastatin_ndc)
 
 # Bind drug files
 all_drug <- bind_rows(ccaed_2009_2021, mdcrd_2009_2021) # 29,000,363 obs
 
 # Save dataset so don't have to do that again
-all_drug |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+all_drug |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021_pravastatin.parquet")
 
 # Open dataset
-all_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+all_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021_pravastatin.parquet")
 
 # Save unique IDs of oac users
-all_oac_users <- unique(all_drug_2009_2021$ENROLID) # 2,360,390 users
+all_pravastatin_users <- unique(all_drug_2009_2021$ENROLID) # 2,360,390 users
 
 ```
-
 
 #Clean drug data
 
@@ -69,26 +63,25 @@ cleaned_drug_data <- all_drug_2009_2021 |>
   select_max_fill() # 26,909,897 obs
 
 # Save dataset so don't have to do that again
-cleaned_drug_data |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data.parquet")
+cleaned_drug_data |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data_pravastatin.parquet")
 
 # Open dataset
-cleaned_drug_data <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data.parquet")
+cleaned_drug_data <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data_pravastatin.parquet")
 
 ```
 
-
 # Assign Index Date
+
 ```{r}
 #Apply functions to create index dates and age-eligible population
-all_oac_index <- cleaned_drug_data |> 
-  calculate_drug_end_plus_grace(adherence_multiplier = 0.2) |> # Adherence Modifier
+all_pravastatin_index <- cleaned_drug_data |> 
+  calculate_drug_end_plus_grace(adherence_multiplier = 0.2) |> 
   flag_gaps_and_assign_episodes(gap_allowed = 183) |> 
   assign_index_date_and_med() |> 
   filter_new_users_age(earliest_index_date = '2009-07-02', age_criteria = 18)
   
 #Extract unique IDs of OAC users meeting criteria  
-all_drug_index_ids <- unique(all_oac_index$ENROLID) #2046098
-
+all_drug_index_ids <- unique(all_pravastatin_index$ENROLID) #2181236
 
 ```
 
@@ -96,14 +89,14 @@ all_drug_index_ids <- unique(all_oac_index$ENROLID) #2046098
 
 ```{r}
 # Write parquet file for patients 18+ with index date and ENROLID for CE assessment
-all_oac_index |>
+all_pravastatin_index |>
   arrange(ENROLID, index_date) |> 
   select(ENROLID, index_date) |> 
   distinct() |> 
-  write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+  write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate_pravastatin.parquet")
 
 # Read in dataset with ENROLID & index_date
-cohort_ids_for_CE <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+cohort_ids_for_CE <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate_pravastatin.parquet")
 
 # Extract relevant ENROLIDs for CE assessment
 cont_enrollment_ids <- unique(cohort_ids_for_CE$ENROLID) 
@@ -124,10 +117,10 @@ mdcr_enroll <- load_enrollment_data("//pharm-psop/Truven Data/Truven Data R/mdcr
 all_enroll <- bind_rows(ccae_enroll, mdcr_enroll) #131847282
 
 # Create parquet file of T datasets with relevant IDs
-all_enroll |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet.parquet") 
+all_enroll |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet_pravastatin.parquet") 
 
 # Read parquet file back into the environment
-enrollment_parquet <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet.parquet") 
+enrollment_parquet <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet_pravastatin.parquet") 
 
 # Apply Continuous Enrollment function
 continuous_enrollment_result <- ContinuousEnrollment(
@@ -145,6 +138,7 @@ ids_with_ce <- unique(continuous_enrollment_result$ENROLID) #1467834 (25% drop)
 ```
 
 # Outcome Identification
+
 ```{r}
 
 # Define a function for event identification and trauma exclusion
@@ -284,19 +278,19 @@ ccae_bleed_outcome_no_trauma <- identify_bleed_outcome(
   dataset_path_s = "//pharm-psop/Truven Data/Truven Data R/ccae/s",
   dataset_path_i = "//pharm-psop/Truven Data/Truven Data R/ccae/i",
   dataset_path_o = "//pharm-psop/Truven Data/Truven Data R/ccae/o",
-  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma_pravastatin.parquet")
 
 mdcr_bleed_outcome_no_trauma <- identify_bleed_outcome(
   dataset_path_s = "//pharm-psop/Truven Data/Truven Data R/mdcr/s",
   dataset_path_i = "//pharm-psop/Truven Data/Truven Data R/mdcr/i",
   dataset_path_o = "//pharm-psop/Truven Data/Truven Data R/mdcr/o",
-  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma_pravastatin.parquet")
 
 
 #Open datasets
-ccae_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+ccae_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma_pravastatin.parquet")
 
-mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma_pravastatin.parquet")
 
 #Merge event files
 all_outcome <- bind_rows(ccae_bleed_outcome_no_trauma, mdcr_bleed_outcome_no_trauma) |> 
@@ -307,9 +301,9 @@ all_outcome <- bind_rows(ccae_bleed_outcome_no_trauma, mdcr_bleed_outcome_no_tra
   mutate(eventnum= row_number()) |> 
   select(c(ENROLID, ADMDATE, DAYS, DISDATE, hospnum, eventnum)) 
 
-all_outcome |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+all_outcome |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma_pravastatin.parquet")
 
-all_inpatient_bleed_no_trauma <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+all_inpatient_bleed_no_trauma <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma_pravastatin.parquet")
 
 #Create vector that includes ENROLID of all individuals who experienced outcome in 2009-2021
 #outcome_vec <- all_inpatient_bleed_no_trauma$ENROLID #1297106
@@ -320,6 +314,7 @@ outcome_vec <- unique(all_inpatient_bleed_no_trauma$ENROLID) #68485
 ```
 
 #Test for days between fills
+
 ```{r}
 # #Evaluate days between fills by drug to get avg. this will be rough and be goofy if people switch and then switch back
 # days_between_fills <- test_2 %>%
@@ -352,8 +347,8 @@ outcome_vec <- unique(all_inpatient_bleed_no_trauma$ENROLID) #68485
 #   theme_minimal()
 ```
 
-
 # Apply continuous exposure rules
+
 ```{r}
 
 # Function to apply continuous exposure rule (i.e., identify when exposure ends )
@@ -388,17 +383,17 @@ apply_continuous_exposure_rules <- function(data, outcome_ids) {
 }
 
 # Apply function to index dataset
-oac_users <- apply_continuous_exposure_rules(all_oac_index, outcome_vec)
+pravastatin_users <- apply_continuous_exposure_rules(all_pravastatin_index, outcome_vec)
 
 
 ## Extract unique ENROLIDs
-oac_user_ids <- unique(oac_users$ENROLID) #68485
+pravastatin_user_ids <- unique(pravastatin_users$ENROLID) #28009
 
 
 ```
 
-
 #Chunk to evaluate stop of follow-up (disenrollment)
+
 ```{r}
 
 # Function to evaluate disenrollment (i.e., censor at gap in enrollment)
@@ -414,7 +409,7 @@ evaluate_disenrollment <- function(enrollment_data, user_ids) {
     PreviousEndDate = lag(DTEND),
     GapDays = as.integer(DTSTART - PreviousEndDate)) |>  # Get prior DTEND and calculate gap b/n DTSTART
   ungroup() |> 
-  left_join(oac_users, by = "ENROLID") |> #Join with dataset w/ observation start time
+  left_join(pravastatin_users, by = "ENROLID") |> #Join with dataset w/ observation start time
   group_by(ENROLID, episode_number) |> 
   mutate(flag = if_else(DTSTART < index_date - 30, 1, 0)) |> #Flag to identify if DTSTART is 30d before index
   filter(flag == 0) |> # filters them patients out
@@ -432,7 +427,7 @@ evaluate_disenrollment <- function(enrollment_data, user_ids) {
   select(ENROLID, episode_number, new_obj_period_end)
 
   # Step 2: Update the follow-up period based on disenrollment
-  updated_cohort <- oac_users |> 
+  updated_cohort <- pravastatin_users |> 
     left_join(disenrollment_data, by = c("ENROLID", "episode_number")) |> 
     select(-obj_period_end) |> 
     rename(obj_period_end = new_obj_period_end)
@@ -441,14 +436,15 @@ evaluate_disenrollment <- function(enrollment_data, user_ids) {
 }
 
 # Apply function
-cohort_oac_users_with_ce_update <- evaluate_disenrollment(enrollment_parquet, oac_user_ids)
+cohort_pravastatin_users_with_ce_update <- evaluate_disenrollment(enrollment_parquet, pravastatin_user_ids)
 
 
 ```
 
 # I think this chunk is trash
+
 ```{r}
-analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
+analytic_cohort_oac <- left_join(cohort_pravastatin_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
   arrange(ENROLID, ADMDATE, episode_number) |> 
   mutate(day_obs_start = 0) |> 
   mutate(day_obs_end = obj_period_end - index_date_2) |> 
@@ -502,6 +498,7 @@ event_proportions <- event_count_before_index |>
 ```
 
 #Build Table 1
+
 ```{r}
 # Calculate unique person-days
 person_days_data <- analytic_cohort_oac %>%
@@ -571,13 +568,12 @@ summary_table <- summary_table %>%
 summary_table
 ```
 
-
-
 # Create analytic cohort
+
 ```{r}
 # Generate the analytic cohort with the people to be evaluated
 
-analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
+analytic_cohort_pravastatin <- left_join(cohort_pravastatin_users_with_ce_update, all_inpatient_bleed_no_trauma , by = "ENROLID") |> 
   arrange(ENROLID, ADMDATE, episode_number) |> 
   mutate(day_obs_start = 0) |> 
   mutate(day_obs_end = obj_period_end - index_date) |> 
@@ -600,26 +596,26 @@ analytic_cohort_oac <- left_join(cohort_oac_users_with_ce_update, all_inpatient_
     TRUE ~ "Other"
   ))
 
-ids_precip_list <- unique(analytic_cohort_oac$ENROLID)
+ids_precip_list <- unique(analytic_cohort_pravastatin$ENROLID)
 ```
 
-
 # Generate outcome datasets for each object drug
+
 ```{r}
 #Generate outcome datsets for each object
 
-create_oac_dataset_for_loop_outcome <- function(oac) {
-  analytic_cohort_oac_filtered <- analytic_cohort_oac |> 
-    filter(object == oac)
+create_pravastatin_dataset_for_loop_outcome <- function(pravastatin) {
+  analytic_cohort_pravastatin_filtered <- analytic_cohort_pravastatin |> 
+    filter(object == pravastatin)
   
-  ids_for_loop <- unique(analytic_cohort_oac$ENROLID)
+  ids_for_loop <- unique(analytic_cohort_pravastatin$ENROLID)
   
-  dataset_for_loop <- analytic_cohort_oac_filtered |> 
+  dataset_for_loop <- analytic_cohort_pravastatin_filtered |> 
   arrange(ENROLID, ADMDATE) |> 
   distinct(ENROLID, .keep_all = TRUE) |> 
   select(ENROLID, index_date, obj_period_end, day_obs_start, day_obs_end, object, episode_number)
   
-  dataset_for_loop_outcome <- analytic_cohort_oac_filtered |> 
+  dataset_for_loop_outcome <- analytic_cohort_pravastatin_filtered |> 
   arrange(ENROLID, ADMDATE) |> 
   select(ENROLID, day_of_event, episode_number) |> 
   distinct() |> #10 duplicates (i.e., multiple events same day)
@@ -638,27 +634,20 @@ create_oac_dataset_for_loop_outcome <- function(oac) {
   
 }
 
-outcome_loops_apixaban <- create_oac_dataset_for_loop_outcome("Apixaban")
-outcome_loops_rivaroxaban <- create_oac_dataset_for_loop_outcome("Rivaroxaban")
-outcome_loops_dabigatran <- create_oac_dataset_for_loop_outcome("Dabigatran Etexilate Mesylate")
-outcome_loops_warfarin <- create_oac_dataset_for_loop_outcome("Warfarin Sodium")
+outcome_loops_pravastatin <- create_pravastatin_dataset_for_loop_outcome("Pravastatin Sodium")
+
 
 #Pull each cohort from the list
 # dataset for loop
-dataset_for_loop_apixaban <- outcome_loops_apixaban$dataset_for_loop
-dataset_for_loop_rivaroxaban <- outcome_loops_rivaroxaban$dataset_for_loop
-dataset_for_loop_dabigatran <- outcome_loops_dabigatran$dataset_for_loop
-dataset_for_loop_warfarin <- outcome_loops_warfarin$dataset_for_loop
+dataset_for_loop_pravastatin <- outcome_loops_pravastatin$dataset_for_loop
 
 # Pull each outcome dataset from the list
-dataset_for_loop_outcome_apixaban <- outcome_loops_apixaban$dataset_for_loop_outcome
-dataset_for_loop_outcome_rivaroxaban <- outcome_loops_rivaroxaban$dataset_for_loop_outcome
-dataset_for_loop_outcome_dabigatran <- outcome_loops_dabigatran$dataset_for_loop_outcome
-dataset_for_loop_outcome_warfarin <- outcome_loops_warfarin$dataset_for_loop_outcome
+dataset_for_loop_outcome_pravastatin <- outcome_loops_pravastatin$dataset_for_loop_outcome
+
 ```
 
-
 # Get full concomitant drug data for each object
+
 ```{r}
 # Function to get full list of drugs used by patients in cohort
 process_dataset <- function(dataset_path) {
@@ -685,33 +674,34 @@ all_drug_full <- bind_rows(ccaed_2009_2021_full, mdcrd_2009_2021_full)
 
 #############
 
+object_pravastatin <- "Pravastatin Sodium"
 # Define function to collect this for each OAC
-oac_precipitant_processing <- function(oac){
+pravastatin_precipitant_processing <- function(pravastatin){
 
 # Select object drug to analyze
-  precipitant_cohort <- analytic_cohort_oac |> 
-    filter(object == oac) |> 
+  precipitant_cohort <- analytic_cohort_pravastatin |> 
+    filter(object == pravastatin) |> 
     arrange(ENROLID, ADMDATE) |> 
     distinct(ENROLID, .keep_all = TRUE) |>  
     select(ENROLID, object, index_date, obj_period_end, day_obs_start, day_obs_end, episode_number)
   
 # Pare down all_drug_full for only ids above
-  oac_specific_precipitants <- all_drug_full |> 
+  pravastatin_specific_precipitants <- all_drug_full |> 
     filter(ENROLID %in% precipitant_cohort$ENROLID)
 
 #Join ENROLID with entire drug data file to pull in Rx history. Filter for drugs used in obj_wind
-precipitant_cohort_2 <- left_join(precipitant_cohort, oac_specific_precipitants, by = "ENROLID") |> #595155
+precipitant_cohort_2 <- left_join(precipitant_cohort, pravastatin_specific_precipitants, by = "ENROLID") |> #595155
   arrange(ENROLID, SVCDATE) |> 
   mutate(precip_start = SVCDATE) |> 
-  mutate(precip_end = round((SVCDATE + DAYSUPP) + (DAYSUPP * 0.2))) |> ## Adherence Modifier
+  mutate(precip_end = round((SVCDATE + DAYSUPP) + (DAYSUPP * 0.2))) |> 
   mutate(
     concom = if_else(
       (precip_start <= obj_period_end & precip_end >= index_date), 1, 0
     )) |> 
   filter(concom ==1) |> 
-  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object_oac, collapse = "|")))) |> 
-  filter(doac ==FALSE) |> 
-  select(-doac) 
+  mutate(pravastatin = if_any(GENNME,~ str_detect(.x, paste(object_pravastatin, collapse = "|")))) |> 
+  filter(pravastatin ==FALSE) |> 
+  select(-pravastatin) 
   
   #Filter out the drugs from the exclusion list plus a few additional outliers
 precipitant_cohort_3 <- precipitant_cohort_2|> 
@@ -787,37 +777,29 @@ precipitant_cohort_9 <- precipitant_cohort_cleaned |>
   mutate(other_anticoag = if_any(precipitant, ~ str_detect(.x, paste(other_anticoag, collapse = "|")))) |>
   mutate(ssri_snri = if_any(precipitant, ~ str_detect(.x, paste(ssri_snri, collapse = "|")))) |>
   mutate(giprotect = if_any(precipitant, ~ str_detect(.x, paste(giprotect, collapse = "|")))) |>
+  mutate(anticoagulant = if_any(precipitant, ~ str_detect(.x, paste(anticoagulant, collapse = "|")))) |> 
   arrange(ENROLID, day_obs_start)
 
 return(list(cohort = precipitant_cohort_9, vector = precipitant_vector))
 }
 
-# Initialize a list to store the results for each OAC
-oac_results <- list()
+# Initialize a list to store the results for each pravastatin
+pravastatin_results <- list()
 
-# Run the function for each OAC and store both the cohort and the vector
-oac_results$apixaban <- oac_precipitant_processing("Apixaban")
-oac_results$rivaroxaban <- oac_precipitant_processing("Rivaroxaban")
-oac_results$dabigatran <- oac_precipitant_processing("Dabigatran Etexilate Mesylate")
-oac_results$warfarin <- oac_precipitant_processing("Warfarin Sodium")
+# Run the function for each pravastatin and store both the cohort and the vector
+pravastatin_results$pravastatin<- pravastatin_precipitant_processing("Pravastatin Sodium")
 
 #Pull each cohort from the list
 # Access the cohort for Apixaban
-apixaban_cohort <- oac_results$apixaban$cohort
-rivaroxaban_cohort <- oac_results$rivaroxaban$cohort
-dabigatran_cohort <- oac_results$dabigatran$cohort
-warfarin_cohort <- oac_results$warfarin$cohort
+pravastatin_cohort <- pravastatin_results$pravastatin$cohort
 
 # Access the precipitant vector for each
-apixaban_vector <- oac_results$apixaban$vector
-rivaroxaban_vector <- oac_results$rivaroxaban$vector
-rivaroxaban_vector <- str_trim(rivaroxaban_vector)
-dabigatran_vector <- oac_results$dabigatran$vector
-warfarin_vector <- oac_results$warfarin$vector
+pravastatin_vector <- pravastatin_results$pravastatin$vector
+
 ```
 
+# Run loop to do SCCS for each object drug
 
-# Run loop to do SCCS for each object drug 
 ```{r}
 # Define function with for loop inside
 loop_function <- function (data, vector, outcome_dataset){ 
@@ -841,12 +823,12 @@ generate_covariate_data <- function(data, covariate_col) {
 }
 
 # Apply the function to generate each covariate drug datasets
-nsaid_data <- generate_covariate_data(data, "nsaid")
+nsaid_data <- generate_covariate_data(pravastatin_cohort, "nsaid")
 antiplatelet_data <- generate_covariate_data(data, "antiplatelet")
 other_anticoag_data <- generate_covariate_data(data, "other_anticoag")
 ssri_snri_data <- generate_covariate_data(data, "ssri_snri")
 giprotect_data <- generate_covariate_data(data, "giprotect")
-
+anticoagulant_data <- generate_covariate_data(pravastatin_cohort, "anticoagulant")
 
 # Function to expand the observation period and mark exposure
 # Define your function to expand the observation period and mark exposure
@@ -898,6 +880,7 @@ expand_and_mark_exposure <- function(data, precipitant_name, outcome_dataset) {
   
   return(result)
 }
+
 
 # Function to get confidence intervals
 get_confints <- function(model, parm) {
@@ -951,12 +934,14 @@ for (i in vector) {
       left_join(other_anticoag_data, by = c("ENROLID", "object", "days" ))  |> 
       left_join(ssri_snri_data, by = c("ENROLID", "object", "days" ))  |> 
       left_join(giprotect_data, by = c("ENROLID", "object", "days")) |> 
+      left_join(anticoagulant_data, by = c("ENROLID", "object", "days")) |> 
       mutate(
         nsaid_exposed = if_else(is.na(nsaid_exposed), 0, nsaid_exposed),
         antiplatelet_exposed = if_else(is.na(antiplatelet_exposed), 0, antiplatelet_exposed),
         other_anticoag_exposed = if_else(is.na(other_anticoag_exposed), 0, other_anticoag_exposed),
         ssri_snri_exposed = if_else(is.na(ssri_snri_exposed), 0, ssri_snri_exposed),
-        giprotect_exposed = if_else(is.na(giprotect_exposed), 0, giprotect_exposed)) 
+        giprotect_exposed = if_else(is.na(giprotect_exposed), 0, giprotect_exposed), 
+        anticoagulant_exposed = if_else(is.na(anticoagulant_exposed), 0, anticoagulant_exposed)) 
     
     # Apply the function to create the binary indicator
     df <- result_cov %>%
@@ -980,617 +965,8 @@ for (i in vector) {
         nsaid_30 = if_else(nsaid_exposed == 1, 1, nsaid_30),
         other_anticoag_30 = if_else(other_anticoag_exposed == 1, 1, other_anticoag_30),
         ssri_snri_30 = if_else(ssri_snri_exposed == 1, 1, ssri_snri_30),
-        giprotect_30 = if_else(giprotect_exposed == 1, 1, giprotect_30)) 
-    
-    df <- df %>%
-      mutate(offset = log(1))
-    
-    # Check for NA values in 'event' column before fitting the model
-    if (any(is.na(df$event))) {
-      stop("Missing values detected in 'event' column")
-    }
-    
-    # Determine model formula based on current precipitant
-    if (i %in% nsaids) {
-      model_formula <- event ~ exposed + antiplatelet_30 + other_anticoag_30 + ssri_snri_30 + giprotect_30
-    } else if (i %in% antiplatelet) {
-      model_formula <- event ~ exposed + nsaid_30 + other_anticoag_30 + ssri_snri_30 + giprotect_30
-    } else if (i %in% other_anticoag) {
-      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + ssri_snri_30 + giprotect_30
-    } else if (i %in% ssri_snri) {
-      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + giprotect_30
-    } else if (i %in% giprotect) {
-      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + ssri_snri_30
-    } else {
-      model_formula <- event ~ exposed + nsaid_30 + antiplatelet_30 + other_anticoag_30 + ssri_snri_30 + giprotect_30
-    }
-    
-    
-    # Fit the conditional Poisson regression model
-    df$ENROLID <- as.factor(df$ENROLID)
-    
-    # Exclude washout period and run the regression
-    df_no_washout <- df %>% filter(washout == 0) # Washout modifier
-
-    model <- gnm(model_formula, eliminate = ENROLID, family = poisson(), data = df_no_washout) #Use df if want to have no washout adjustment
-    model_summary <- summary(model)
-    
-    coefs <- coef(model_summary)
-    coefs_exp <- exp(coef(model))
-    confints_exp <- get_confints(model, "exposed")
-
-    
-    combined_df2 <- data.frame(
-      Estimate = coefs[1],
-      IRR = coefs_exp[1],
-      SE = summary(model)$coefficients[1, "Std. Error"],
-      z_value = summary(model)$coefficients[1, "z value"],
-      p_value = summary(model)$coefficients[1, "Pr(>|z|)"],
-      `Lower 95%` = confints_exp[1],
-      `Upper 95%` = confints_exp[2],
-      drug = i
-    )
-
-    # Append to results table
-    results_table <- bind_rows(results_table, combined_df2)
-    
-  }, error = function(e) {
-    cat("ERROR with precipitant drug:", i, "\n", conditionMessage(e), "\n")
-    #stop(paste("Error occurred with precipitant drug:", i))
-  })
-}
-return(results_table)
-}
-
-apixaban_results <- loop_function(apixaban_cohort, apixaban_vector, dataset_for_loop_outcome_apixaban)
-rivaroxaban_results <- loop_function(rivaroxaban_cohort, rivaroxaban_vector, dataset_for_loop_outcome_rivaroxaban)
-dabigatran_results <- loop_function(dabigatran_cohort, dabigatran_vector, dataset_for_loop_outcome_dabigatran)
-warfarin_results <- loop_function(warfarin_cohort, warfarin_vector, dataset_for_loop_outcome_warfarin)
-
-
-#generate number of precipitants with estimate; remove variance >10 as per Zhou paper: 
-# Calculate variance from SE
-apixaban_results_filtered <- apixaban_results %>%
-  mutate(variance = SE^2) |> 
-  filter(variance <= 10)
-
-rivaroxaban_results_filtered <- rivaroxaban_results %>%
-  mutate(variance = SE^2) |> 
-  filter(variance <= 10)
-
-dabigatran_results_filtered <- dabigatran_results %>%
-  mutate(variance = SE^2) |> 
-  filter(variance <= 10)
-
-warfarin_results_filtered <- warfarin_results %>%
-  mutate(variance = SE^2) |> 
-  filter(variance <= 10)
-
-#save each of these datasets
-write.xlsx(apixaban_results, file = "apixaban_shrinkage_results.xlsx", sheetName = "Raw", append = FALSE)
-write.xlsx(apixaban_results_filtered, file = "apixaban_shrinkage_results.xlsx", sheetName = "Raw_Filtered", append = TRUE)
-write.xlsx(rivaroxaban_results, file = "rivaroxaban_shrinkage_results.xlsx", sheetName = "Raw", append = FALSE)
-write.xlsx(rivaroxaban_results_filtered, file = "rivaroxaban_shrinkage_results.xlsx", sheetName = "Raw_Filtered", append = TRUE)
-write.xlsx(dabigatran_results, file = "dabigatran_shrinkage_results.xlsx", sheetName = "Raw", append = FALSE)
-write.xlsx(dabigatran_results_filtered, file = "dabigatran_shrinkage_results.xlsx", sheetName = "Raw_Filtered", append = TRUE)
-write.xlsx(warfarin_results, file = "warfarin_shrinkage_results.xlsx", sheetName = "Raw", append = FALSE)
-write.xlsx(warfarin_results_filtered, file = "warfarin_shrinkage_results.xlsx", sheetName = "Raw_Filtered", append = TRUE)
-
-
-```
-
-
-#Shrinkage
-```{r}
-#Shinkage: 
-#Define the semi-Bayes shrinkage function
-semi_bayes_shrinkage <- function(log_rr, se, prior_mean_log = 0, prior_var_log = 0.25) {
-  # Calculate the precision (inverse of the variance)
-  prior_precision = 1 / prior_var_log
-  se_squared = se^2
-  precision = 1 / se_squared
-  
-  # Calculate the posterior mean and variance
-  post_precision = prior_precision + precision
-  post_mean_log = (prior_mean_log * prior_precision + log_rr * precision) / post_precision
-  post_var_log = 1 / post_precision
-  
-  # Calculate the posterior standard error
-  post_se_log <- sqrt(post_var_log)
-  
-  # Calculate the shrunken log RR and confidence intervals
-  shrunken_log_rr = post_mean_log
-  lower_ci_log = post_mean_log - 1.96 * post_se_log
-  upper_ci_log = post_mean_log + 1.96 * post_se_log
-  
-  return(data.frame(shrunken_log_rr, lower_ci_log, upper_ci_log, post_se_log))
-}
-
-# Apply the semi-Bayes shrinkage function to the regression results
-apply_shrinkage_to_cohort <- function(data) {
-  # Apply semi-Bayes shrinkage
-  shrinkage_results <- data %>%
-    mutate(
-      shrinkage = map2(Estimate, SE, semi_bayes_shrinkage),  # Apply shrinkage
-      shrunken_log_rr = map_dbl(shrinkage, "shrunken_log_rr"),
-      lower_ci_log = map_dbl(shrinkage, "lower_ci_log"),
-      upper_ci_log = map_dbl(shrinkage, "upper_ci_log"),
-      post_se_log = map_dbl(shrinkage, "post_se_log"),  # Extract posterior SE
-      shrunken_irr = exp(shrunken_log_rr),
-      lower_ci = exp(lower_ci_log),
-      upper_ci = exp(upper_ci_log)
-    ) %>%
-    select(-shrinkage)
-  
-  # Filter for statistically significant results
-  significant_results <- shrinkage_results %>%
-    filter(lower_ci > 1 | upper_ci < 1)
-  
-  return(list(all_results = shrinkage_results, significant_results = significant_results))
-}
-
-# Apply shrinkage to each oac
-apixaban_shrinkage <- apply_shrinkage_to_cohort(apixaban_results_filtered)
-rivaroxaban_shrinkage <- apply_shrinkage_to_cohort(rivaroxaban_results_filtered)
-dabigatran_shrinkage <- apply_shrinkage_to_cohort(dabigatran_results_filtered)
-warfarin_shrinkage <- apply_shrinkage_to_cohort(warfarin_results_filtered)
-
-
-# Extract results for each
-apixaban_shrinkage_results <- apixaban_shrinkage$all_results
-apixaban_significant_results <- apixaban_shrinkage$significant_results
-
-rivaroxaban_shrinkage_results <- rivaroxaban_shrinkage$all_results
-rivaroxaban_significant_results <- rivaroxaban_shrinkage$significant_results
-
-dabigatran_shrinkage_results <- dabigatran_shrinkage$all_results
-dabigatran_significant_results <- dabigatran_shrinkage$significant_results
-
-warfarin_shrinkage_results <- warfarin_shrinkage$all_results
-warfarin_significant_results <- warfarin_shrinkage$significant_results
-
-
-# Export tables to separate sheets in the same Excel file
-write.xlsx(apixaban_shrinkage_results, file = "apixaban_shrinkage_results.xlsx", sheetName = "Shrunk Results", append = TRUE)
-write.xlsx(apixaban_significant_results, file = "apixaban_shrinkage_results.xlsx", sheetName = "Significant Shrunk Results", append = TRUE)
-
-write.xlsx(rivaroxaban_shrinkage_results, file = "rivaroxaban_shrinkage_results.xlsx", sheetName = "Shrunk Results", append = TRUE)
-write.xlsx(rivaroxaban_significant_results, file = "rivaroxaban_shrinkage_results.xlsx", sheetName = "Significant Shrunk Results", append = TRUE)
-
-write.xlsx(dabigatran_shrinkage_results, file = "dabigatran_shrinkage_results.xlsx", sheetName = "Shrunk Results", append = TRUE)
-write.xlsx(dabigatran_significant_results, file = "dabigatran_shrinkage_results.xlsx", sheetName = "Significant Shrunk Results", append = TRUE)
-
-write.xlsx(warfarin_shrinkage_results, file = "warfarin_shrinkage_results.xlsx", sheetName = "Shrunk Results", append = TRUE)
-write.xlsx(warfarin_significant_results, file = "warfarin_shrinkage_results.xlsx", sheetName = "Significant Shrunk Results", append = TRUE)
-
-
-```
-
-
-# Calculate ratio of ratios for each oac vs. pravastatin
-```{r}
-
-combined_results <- apixaban_shrinkage_results %>%
-    inner_join(pravastatin_shrinkage_results, by = "drug", suffix = c("_oac", "_pravastatin"))
-
-# Define the function
-compare_oac_to_pravastatin <- function(oac_file_path, pravastatin_file_path, oac_sheet = "Significant Shrunk Results", pravastatin_sheet = "Shrunk Results") {
-  
-  # Read in the data for the OAC and Pravastatin
-  pravastatin_shrinkage_results <- read_excel(pravastatin_file_path, sheet = pravastatin_sheet)
-  oac_shrinkage_results <- read_excel(oac_file_path, sheet = oac_sheet)
-  
-  # Join the two datasets on the "drug" column to compare OAC vs Pravastatin
-  combined_results <- oac_shrinkage_results %>%
-    inner_join(pravastatin_shrinkage_results, by = "drug", suffix = c("_oac", "_pravastatin")) %>%
-    mutate(
-      # Calculate the log RR ratio (difference between shrunken log RRs)
-      log_rr_ratio = shrunken_log_rr_oac - shrunken_log_rr_pravastatin,
-      
-      # Calculate the variance of the log RR ratio using original SEs
-      log_rr_ratio_variance = post_se_log_oac^2 + post_se_log_pravastatin^2,
-      
-      # Calculate confidence intervals for the log RR ratio
-      log_rr_ratio_ci_lower = log_rr_ratio - 1.96 * sqrt(log_rr_ratio_variance),
-      log_rr_ratio_ci_upper = log_rr_ratio + 1.96 * sqrt(log_rr_ratio_variance),
-      
-      # Exponentiate to obtain the RR ratio and CI on the RR ratio scale
-      rr_ratio = exp(log_rr_ratio),
-      rr_ratio_ci_lower = exp(log_rr_ratio_ci_lower),
-      rr_ratio_ci_upper = exp(log_rr_ratio_ci_upper),
-      
-      # Calculate the z-value and p-value for the log RR ratio
-      z_value = log_rr_ratio / sqrt(log_rr_ratio_variance),
-      p_value = 2 * (1 - pnorm(abs(z_value)))  # Two-sided p-value
-    ) %>%
-    select(drug, rr_ratio, rr_ratio_ci_lower, rr_ratio_ci_upper, p_value)
-  
-  return(combined_results)
-}
-
-
-
-apixaban_delta_results <- compare_oac_to_pravastatin("apixaban_shrinkage_results.xlsx", "pravastatin_shrinkage_results.xlsx")
-rivaroxaban_delta_results <- compare_oac_to_pravastatin("rivaroxaban_shrinkage_results.xlsx", "pravastatin_shrinkage_results.xlsx")
-dabigatran_delta_results <- compare_oac_to_pravastatin("dabigatran_shrinkage_results.xlsx", "pravastatin_shrinkage_results.xlsx")
-warfarin_delta_results <- compare_oac_to_pravastatin("warfarin_shrinkage_results.xlsx", "pravastatin_shrinkage_results.xlsx")
-
-
-```
-
-
-
-
-# Old Code
-```{r}
-# Initialize the final results table
-final_results_table <- data.frame()
-
-# Loop over each OAC
-for (oac in object_oac) {
-  cat("Processing OAC:", oac, "\n")
-  
-  # Select object drug to analyze
-  analytic_cohort_oac <- analytic_cohort_oac |> 
-    filter(object == object_oac)
-  
-  # Isolate those ids for a later loop
-  ids_for_loop <- unique(analytic_cohort_oac$ENROLID)
-  
-  
-  
-  
-  
-  
-  
-  
-  # Create a dataset for the loop
-  dataset_for_loop <- analytic_cohort_oac |> 
-    arrange(ENROLID, ADMDATE) |> 
-    distinct(ENROLID, .keep_all = TRUE) |> 
-    select(ENROLID, index_date, obj_period_end, day_obs_start, day_obs_end, object, episode_number)
-  
-  #
-dataset_for_loop_outcome <- analytic_cohort_oac |> 
-  arrange(ENROLID, ADMDATE) |> 
-  select(ENROLID, day_of_event, episode_number) |> 
-  distinct() |> #10 duplicates (i.e., multiple events same day)
-  group_by(ENROLID, episode_number) |>
-  mutate(event_number = row_number()) |>
-  ungroup() |> 
-  pivot_wider(
-    id_cols = c(ENROLID, episode_number),  
-    names_from = event_number, 
-    values_from = day_of_event,
-    names_prefix = "event_"
-  )
-
-#Precipitant List Generation
-
-# Function to get full list of drugs used by patients in cohort
-
-process_dataset <- function(dataset_path, output_path) {
-  drug_data <- open_dataset(dataset_path) |> 
-    select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP))|>
-    to_duckdb() |> 
-    filter(ENROLID %in% ids_for_loop) |> 
-    collect()
-  
-  dataset_names <- drug_data |> 
-    left_join(redbook, by = "NDCNUM") |>  
-    select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP, THRDTDS, GENNME, MASTFRM)) 
-  
-  # Save the processed dataset
-  dataset_names |> write_parquet(output_path)
-  
-  return(dataset_names)
-}
-
-# Process ccae & mdcr datasets
-ccaed_2009_2021_full <- process_dataset(dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021_full.parquet")
-mdcrd_2009_2021_full <- process_dataset(dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021_full.parquet")
-
-#Bind drug files
-all_drug_full <- bind_rows(ccaed_2009_2021_full, mdcrd_2009_2021_full) 
-#Create a list of precipitant drugs that are filled during the object window for each person
-
-#Step 1: Isolate ENROLIDs and retain index date and stop date (i.e., obj period end)
-precipitant_cohort <- analytic_cohort_oac |> 
-  arrange(ENROLID, ADMDATE) |> 
-  distinct(ENROLID, episode_number, .keep_all = TRUE) |>  
-  select(ENROLID, object, index_date_2, obj_period_end, episode_number)
-
-
-#Join ENROLID with entire drug data file to pull in Rx history. Filter for drugs used in obj_wind
-precipitant_cohort_2 <- left_join(precipitant_cohort, all_drug_full, by = "ENROLID") |> #595155
-  arrange(ENROLID, SVCDATE) |> 
-  mutate(precip_start = SVCDATE) |> 
-  mutate(precip_end = SVCDATE + DAYSUPP) |> 
-  mutate(
-    concom = if_else(
-      (precip_start <= obj_period_end & precip_end >= index_date_2), 1, 0
-    )) |> 
-  filter(concom ==1) |> 
-  mutate(doac = if_any(GENNME,~ str_detect(.x, paste(object_oac, collapse = "|")))) |> 
-  filter(doac ==FALSE) |> 
-  select(-doac) 
-
-#Filter out the drugs from the exclusion list plus a few additional outliers
-precipitant_cohort_3 <- precipitant_cohort_2|> 
-  filter(!MASTFRM %in% excluded_mastfrm) |>
-  filter(!THRDTDS %in% excluded_thrdtds) |> 
-  filter(!str_detect(THRDTDS, "S/M")) |> 
-  filter(!GENNME %in% excluded_gennme)
-
-#Pull out the individual drugs. Split out combination products
-precipitant_active_ingredients <- precipitant_cohort_3 |> 
-  separate(GENNME, into = paste0("col", 1:10), sep = "/", fill = "right") |> 
-  pivot_longer(cols = starts_with("col"), names_to = "name", values_to = "GENNME", values_drop_na = TRUE, names_repair = "unique") |> 
-  separate(GENNME, into = paste0("drug", 1:10), sep = ";", fill = "right") |> 
-  pivot_longer(cols = starts_with("drug"), names_to = "name2", values_to = "GENNME", values_drop_na = TRUE, names_repair = "unique") |> 
-  filter(!is.na(GENNME)) |> 
-  select(ENROLID, GENNME)
-
-
-# Write the precipitants dataframe to an Excel file to allow manual renaming for mismatches
-#write.xlsx(precipitant_active_ingredient, file = "precipitant_active_ingredient.xlsx")
-
-# Created a mapping pathway for drugs used with ANY OAC. Read in here
-drug_mapping <- read_excel("drug_mapping.xlsx")
-
-#First use the mapping to correct names in the drug list 
-precipitant_active_ingredient_mapped <- precipitant_active_ingredients |> 
-  left_join(drug_mapping, by = "GENNME") |> 
-  mutate(GENNME = if_else(is.na(NEWNAME), GENNME, NEWNAME)) |> 
-  select(-NEWNAME)
-
-# Count unique ENROLID for each drug and limit drug list to those used among 5+ unique people
-drug_counts <- precipitant_active_ingredient_mapped %>%
-  group_by(GENNME) %>%
-  summarise(unique_enrolid_count = n_distinct(ENROLID)) |> 
-  filter(unique_enrolid_count > 4)
-
-# Save as a vector for future use in a loop
-precipitant_vector <- unique(drug_counts$GENNME)
-
-#Next use the mapping to correct names in the precipitant dataset. 
-##First derive function
-replace_drug_names_in_string <- function(drug_string, mapping) {
-  for (i in 1:nrow(mapping)) {
-    drug_string <- gsub(mapping$GENNME[i], mapping$NEWNAME[i], drug_string, fixed = TRUE)
-  }
-  return(drug_string)
-}
-
-# Apply the function to the GENNME column in the main dataset
-precipitant_cohort_4 <- precipitant_cohort_3 %>%
-  arrange(ENROLID, SVCDATE) |>
-  filter(!is.na(AGE)) |> 
-  filter(ENROLID %in% ids_for_loop) |> 
-  mutate(GENNME = sapply(GENNME, replace_drug_names_in_string, mapping = drug_mapping))
-
-# Modify cohort so have appropriate variable names for later
-precipitant_cohort_5 <- precipitant_cohort_4 |> 
-  mutate(pre_fill_end = SVCDATE + DAYSUPP + (DAYSUPP *0.2)) |>  #Removing grace for now: 
-  rename(expo_start_date = SVCDATE) |> 
-  rename(expo_end_date = pre_fill_end) |> 
-  rename(precipitant=GENNME)
-
-
-
-
-#Apply days' supply cleaning to precipitants
-precipitant_cohort_6 <- precipitant_cohort_5 %>%
-  arrange(ENROLID, expo_start_date, DAYSUPP) |> 
-  group_by(ENROLID, episode_number, expo_start_date, precipitant) %>%
-  mutate(absolute_daysupp = abs(DAYSUPP)) %>%
-  filter(
-    !(DAYSUPP < 0 & absolute_daysupp %in% DAYSUPP[DAYSUPP > 0]) &
-    !(DAYSUPP > 0 & absolute_daysupp %in% abs(DAYSUPP[DAYSUPP < 0]))
-  ) %>%
-  ungroup() %>%
-  select(-absolute_daysupp)
-
-# Step 2: Remove sequential matching pairs within 15 days
-precipitant_cohort_7 <- precipitant_cohort_6 %>%
-  group_by(ENROLID, episode_number, precipitant) %>%
-  arrange(ENROLID, precipitant, expo_start_date) %>%
-  mutate(
-    next_svdate = lead(expo_start_date),
-    next_daysupp = lead(DAYSUPP),
-    days_diff = as.numeric(difftime(next_svdate, expo_start_date, units = "days")),
-    # Mark rows to remove where a positive is followed by a canceling negative within 15 days
-    to_remove = DAYSUPP > 0 & next_daysupp == -DAYSUPP & days_diff <= 15
-  ) %>%
-  # Filter out the marked rows and also their corresponding canceling negative rows
-  filter(is.na(to_remove) | to_remove == FALSE) %>%
-  select(-next_svdate, -next_daysupp, -days_diff, -to_remove) %>%
-  ungroup() |> 
-  filter(DAYSUPP > 0)
-
-#Select max value if multiple fills on same day. 
-precipitant_cohort_8 <- precipitant_cohort_7 %>%
-  group_by(ENROLID, episode_number, expo_start_date, precipitant) %>%
-  filter(DAYSUPP == max(DAYSUPP, na.rm = TRUE)) %>%
-  ungroup() 
-
-
-
-##Creates days of exposure start and end, but it creates problems when there are negative ds
-precipitant_cohort_9 <- precipitant_cohort_8 |> 
-  select(ENROLID, precipitant, expo_start_date, expo_end_date, episode_number) |> 
-  left_join(dataset_for_loop, by = c("ENROLID", "episode_number")) |> 
-  select(ENROLID, object, day_obs_start, day_obs_end, index_date_2, obj_period_end, precipitant, expo_start_date, expo_end_date, episode_number) |> 
-  mutate(day_exposure_start = as.numeric(expo_start_date - index_date_2)) |> 
-  filter(day_exposure_start <= day_obs_end) |> 
-  mutate(day_exposure_end = as.numeric(expo_end_date - index_date_2)) |> 
-  filter(day_exposure_end >= 0) |> 
-  mutate(nsaid = if_any(precipitant, ~ str_detect(.x, paste(nsaids, collapse = "|")))) |> 
-  mutate(antiplatelet = if_any(precipitant, ~ str_detect(.x, paste(antiplatelet, collapse = "|")))) |> 
-  mutate(other_anticoag = if_any(precipitant, ~ str_detect(.x, paste(other_anticoag, collapse = "|")))) |>
-  mutate(ssri_snri = if_any(precipitant, ~ str_detect(.x, paste(ssri_snri, collapse = "|")))) |>
-  mutate(giprotect = if_any(precipitant, ~ str_detect(.x, paste(giprotect, collapse = "|")))) |>
-  arrange(ENROLID, day_obs_start) |> 
-  #filter(episode_number == 0) |> 
-  mutate(ENROLID = paste0(ENROLID, "_", episode_number)) |> 
-  select(-episode_number)
-
-
-## Function to add in covariates
-generate_covariate_data <- function(data, covariate_col) {
-  data %>%
-    filter(!!sym(covariate_col) == TRUE) %>%
-    rowwise() %>%
-    mutate(days = list(day_obs_start:day_obs_end)) %>%
-    unnest(cols = c(days)) %>%
-    group_by(ENROLID, days) %>%
-    mutate(
-      exposure_flag = if_else(
-        any(days >= day_exposure_start & days <= day_exposure_end), 1, 0
-      )
-    ) %>%
-    ungroup() %>%
-    distinct(ENROLID, object, days, exposure_flag) %>%
-    rename(!!paste0(covariate_col, "_exposed") := exposure_flag)
-}
-
-# Apply the function to generate each covariate drug datasets
-nsaid_data <- generate_covariate_data(precipitant_cohort_9, "nsaid")
-antiplatelet_data <- generate_covariate_data(precipitant_cohort_9, "antiplatelet")
-other_anticoag_data <- generate_covariate_data(precipitant_cohort_9, "other_anticoag")
-ssri_snri_data <- generate_covariate_data(precipitant_cohort_9, "ssri_snri")
-giprotect_data <- generate_covariate_data(precipitant_cohort_9, "giprotect")
-
-
-
-
-
-
-# Initialize the results tables
-results_table <- data.frame()
-
-
-# Function to expand the observation period and mark exposure
-# Define your function to expand the observation period and mark exposure
-expand_and_mark_exposure <- function(data, precipitant_name) {
-  # Expand observation period
-  long_data <- data %>%
-    rowwise() %>%
-    mutate(days = list(day_obs_start:day_obs_end)) %>%
-    unnest(cols = c(days))
-  
-  # Mark exposure period
-  long_data <- long_data %>%
-    group_by(ENROLID,  days) %>%
-    mutate(
-      exposed = if_else(precipitant == precipitant_name &
-        any(days >= day_exposure_start & days <= day_exposure_end), 
-        1, 0
-      )
-    ) %>%
-    distinct(ENROLID,  object, days, exposed) %>%
-    ungroup()
-  
-
-
-  # Join with outcome data
-  test <- long_data %>%
-    left_join(dataset_for_loop_outcome, by = "ENROLID") %>%
-    mutate(event = if_else(days == event_1 | days == event_2 | days == event_3, 1, 0, missing = 0)) %>%
-    select(-c(event_1, event_2, event_3)) |> 
-    arrange(ENROLID, days) %>%  # Ensure data is ordered correctly
-  group_by(ENROLID) %>%  # Group by ENROLID to apply the logic per individual
-  mutate(washout = if_else(lag(exposed, 0) == 1 | lag(exposed, 1) == 1 | 
-                           lag(exposed, 2) == 1 | lag(exposed, 3) == 1 |
-                           lag(exposed, 4) == 1 | lag(exposed, 5) == 1 |
-                           lag(exposed, 6) == 1, 1, 0)) %>%
-  ungroup() |> 
-  mutate(washout = if_else(exposed == 1 & washout == 1, 0, washout)) |> 
-  arrange(ENROLID, days)
-  
-  return(test)
-}
-
-# Function to get confidence intervals
-get_confints <- function(model, parm) {
-  try({
-    # Attempt to get profile likelihood confidence intervals
-    confints <- confint(model, parm = parm)
-    confints_exp <- exp(confints)
-    return(confints_exp)
-  }, silent = TRUE)
-  
- # If `confint` fails, proceed to manual calculation
-  coef_parm <- coef(model)[parm]
-  se_parm <- sqrt(vcov(model)[parm, parm])
-  alpha <- 0.05
-  z_value <- qnorm(1 - alpha / 2)
-  confint_lower <- coef_parm - z_value * se_parm
-  confint_upper <- coef_parm + z_value * se_parm
-  confints_manual <- c(confint_lower, confint_upper)
-  names(confints_manual) <- c("2.5 %", "97.5 %")
-  confints_exp_manual <- exp(confints_manual)
-  
-  return(confints_exp_manual)
-}
-
-# Initialize the results tables
-results_table <- data.frame()
-
-#precipitant_vector <- "Levothyroxine Sodium"
-# Loop through each precipitant
-for (i in precipitant_vector) {
-  tryCatch({
-    cat("Processing precipitant:", i, "\n") # Debug statement
-    
-    # Filter the data for the current precipitant
-    data <- precipitant_cohort_9 %>%
-      filter(str_detect(precipitant, i))
-    
-    if (nrow(data) == 0) {
-      stop(paste("No data found for precipitant:", i))
-    }
-    
-    # Apply the function to the data
-    result <- expand_and_mark_exposure(data, i)
-    
-    #Merge in NSAID data
-    result_cov <- result |> 
-      left_join(nsaid_data, by = c("ENROLID", "object", "days" )) |> 
-      left_join(antiplatelet_data, by = c("ENROLID", "object", "days" ))  |> 
-      left_join(other_anticoag_data, by = c("ENROLID", "object", "days" ))  |> 
-      left_join(ssri_snri_data, by = c("ENROLID", "object", "days" ))  |> 
-      left_join(giprotect_data, by = c("ENROLID", "object", "days")) |> 
-      mutate(
-        nsaid_exposed = if_else(is.na(nsaid_exposed), 0, nsaid_exposed),
-        antiplatelet_exposed = if_else(is.na(antiplatelet_exposed), 0, antiplatelet_exposed),
-        other_anticoag_exposed = if_else(is.na(other_anticoag_exposed), 0, other_anticoag_exposed),
-        ssri_snri_exposed = if_else(is.na(ssri_snri_exposed), 0, ssri_snri_exposed),
-        giprotect_exposed = if_else(is.na(giprotect_exposed), 0, giprotect_exposed)) 
-    
-    # Apply the function to create the binary indicator
-    df <- result_cov %>%
-      group_by(ENROLID) %>%
-      arrange(ENROLID, days) %>%
-      mutate(
-        nsaid_30 = rollapplyr(nsaid_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
-        antiplatelet_30 = rollapplyr(antiplatelet_exposed, width = 30, FUN = sum, fill = NA, align = "right"), 
-        other_anticoag_30 = rollapplyr(other_anticoag_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
-        ssri_snri_30 = rollapplyr(ssri_snri_exposed, width = 30, FUN = sum, fill = NA, align = "right"),
-        giprotect_30 = rollapplyr(giprotect_exposed, width = 30, FUN = sum, fill = NA, align = "right")) %>%
-      mutate(
-        nsaid_30 = if_else(!is.na(nsaid_30) & nsaid_30 > 0, 1, 0),
-        antiplatelet_30 = if_else(!is.na(antiplatelet_30) & antiplatelet_30 > 0, 1, 0), 
-        other_anticoag_30 = if_else(!is.na(other_anticoag_30) & other_anticoag_30 > 0, 1, 0), 
-        ssri_snri_30 = if_else(!is.na(ssri_snri_30) & ssri_snri_30 > 0, 1, 0),
-        giprotect_30 = if_else(!is.na(giprotect_30) & giprotect_30 > 0, 1, 0)) %>%
-      ungroup() |> 
-      mutate(
-        antiplatelet_30 = if_else(antiplatelet_exposed == 1, 1, antiplatelet_30),
-        nsaid_30 = if_else(nsaid_exposed == 1, 1, nsaid_30),
-        other_anticoag_30 = if_else(other_anticoag_exposed == 1, 1, other_anticoag_30),
-        ssri_snri_30 = if_else(ssri_snri_exposed == 1, 1, ssri_snri_30),
-        giprotect_30 = if_else(giprotect_exposed == 1, 1, giprotect_30)) 
+        giprotect_30 = if_else(giprotect_exposed == 1, 1, giprotect_30)) |> 
+      filter(anticoagulant_exposed == 0) # filter out observation days exposed to pravastatin (guidance from Zhou 2020)
     
     df <- df %>%
       mutate(offset = log(1))
@@ -1628,6 +1004,7 @@ for (i in precipitant_vector) {
     coefs <- coef(model_summary)
     coefs_exp <- exp(coef(model))
     confints_exp <- get_confints(model, "exposed")
+
     
     combined_df2 <- data.frame(
       Estimate = coefs[1],
@@ -1639,7 +1016,7 @@ for (i in precipitant_vector) {
       `Upper 95%` = confints_exp[2],
       drug = i
     )
-    
+
     # Append to results table
     results_table <- bind_rows(results_table, combined_df2)
     
@@ -1648,7 +1025,27 @@ for (i in precipitant_vector) {
     #stop(paste("Error occurred with precipitant drug:", i))
   })
 }
+return(results_table)
+}
 
+pravastatin_results <- loop_function(pravastatin_cohort, pravastatin_vector, dataset_for_loop_outcome_pravastatin)
+
+#generate number of precipitants with estimate; remove variance >10 as per Zhou paper: 
+# Calculate variance from SE
+pravastatin_results_filtered <- pravastatin_results %>%
+  mutate(variance = SE^2) |> 
+  filter(variance <= 10)
+
+#save each of these datasets
+write.xlsx(pravastatin_results, file = "pravastatin_shrinkage_results.xlsx", sheetName = "Raw", append = FALSE)
+write.xlsx(pravastatin_results_filtered, file = "pravastatin_shrinkage_results.xlsx", sheetName = "Raw_Filtered", append = TRUE)
+
+
+```
+
+#Shrinkage
+
+```{r}
 #Shinkage: 
 #Define the semi-Bayes shrinkage function
 semi_bayes_shrinkage <- function(log_rr, se, prior_mean_log = 0, prior_var_log = 0.25) {
@@ -1662,33 +1059,50 @@ semi_bayes_shrinkage <- function(log_rr, se, prior_mean_log = 0, prior_var_log =
   post_mean_log = (prior_mean_log * prior_precision + log_rr * precision) / post_precision
   post_var_log = 1 / post_precision
   
+  # Calculate the posterior standard error
+  post_se_log <- sqrt(post_var_log)
+  
   # Calculate the shrunken log RR and confidence intervals
   shrunken_log_rr = post_mean_log
-  lower_ci_log = post_mean_log - 1.96 * sqrt(post_var_log)
-  upper_ci_log = post_mean_log + 1.96 * sqrt(post_var_log)
+  lower_ci_log = post_mean_log - 1.96 * post_se_log
+  upper_ci_log = post_mean_log + 1.96 * post_se_log
   
-  return(data.frame(shrunken_log_rr, lower_ci_log, upper_ci_log))
+  return(data.frame(shrunken_log_rr, lower_ci_log, upper_ci_log, post_se_log))
 }
 
+
 # Apply the semi-Bayes shrinkage function to the regression results
-shrinkage_results <- rivaroxaban_results %>%
-  rowwise() %>%
-  mutate(
-    shrinkage = list(semi_bayes_shrinkage(Estimate, SE)),
-    shrunken_log_rr = shrinkage$shrunken_log_rr,
-    lower_ci_log = shrinkage$lower_ci_log,
-    upper_ci_log = shrinkage$upper_ci_log,
-    shrunken_irr = exp(shrunken_log_rr),
-    lower_ci = exp(lower_ci_log),
-    upper_ci = exp(upper_ci_log)
-  ) %>%
-  select(-shrinkage) %>%
-  unnest(cols = c(shrunken_log_rr, lower_ci_log, upper_ci_log, shrunken_irr, lower_ci, upper_ci))
+apply_shrinkage_to_cohort <- function(data) {
+  # Apply semi-Bayes shrinkage
+  shrinkage_results <- data %>%
+    mutate(
+      shrinkage = map2(Estimate, SE, semi_bayes_shrinkage),  # Apply shrinkage
+      shrunken_log_rr = map_dbl(shrinkage, "shrunken_log_rr"),
+      lower_ci_log = map_dbl(shrinkage, "lower_ci_log"),
+      upper_ci_log = map_dbl(shrinkage, "upper_ci_log"),
+      post_se_log = map_dbl(shrinkage, "post_se_log"),  # Extract posterior SE
+      shrunken_irr = exp(shrunken_log_rr),
+      lower_ci = exp(lower_ci_log),
+      upper_ci = exp(upper_ci_log)
+    ) %>%
+    select(-shrinkage)
+  
+  # Filter for statistically significant results
+  significant_results <- shrinkage_results %>%
+    filter(lower_ci > 1 | upper_ci < 1)
+  
+  return(list(all_results = shrinkage_results, significant_results = significant_results))
+}
 
-# Isolate statistically significant variables (where CI does not include 1)
-significant_results <- shrinkage_results %>%
-  filter(lower_ci > 1 | upper_ci < 1)
+# Apply shrinkage to each pravastatin
+pravastatin_shrinkage <- apply_shrinkage_to_cohort(pravastatin_results)
+
+# Extract results for each
+pravastatin_shrinkage_results <- pravastatin_shrinkage$all_results
+pravastatin_significant_results <- pravastatin_shrinkage$significant_results
+
+
+# Export both tables to separate sheets in the same Excel file
+write.xlsx(pravastatin_shrinkage_results, file = "pravastatin_shrinkage_results.xlsx", sheetName = "Shrunk Results", append = TRUE)
+write.xlsx(pravastatin_significant_results, file = "pravastatin_shrinkage_results.xlsx", sheetName = "Significant Shrunk Results", append = TRUE)
 ```
-
-
-
