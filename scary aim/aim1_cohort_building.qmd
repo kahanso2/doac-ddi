@@ -1,0 +1,350 @@
+---
+title: "Aim 1"
+author: "Kent Hanson"
+format: html
+editor: visual
+---
+# Packages
+
+```{r}
+#| label: load-packages/functions
+#| include: false
+
+pacman::p_load(tidyverse, arrow, duckdb, tictoc, haven, reshape2, lubridate, SCCS, janitor, fs, here, AdhereR, remotes, lme4, gnm, survival, grid, forestploter, duckplyr, xlsx, data.table, progress, readxl, zoo, msm)
+
+# Call functions
+source(here("codes/functions.R"))
+source(here("codes/codes.R"))
+
+redbook <- open_dataset("//pharm-psop/Truven Data/Truven Data R/redbook.parquet") |> 
+  collect()
+
+options(scipen = 999)
+
+```
+
+# Introduction
+
+Oral anticoagulants are a class of medications indicated for thromboembolic disorders, such as atrial fibrillation-related stroke prevention, deep vein thrombosis, and pulmonary embolism.58 Over the past decade, the management of these conditions has drastically changed, chiefly stemming from the advent of DOACs, which have revolutionized treatment.123 These agents represent a compelling alternative to warfarin therapy, given the substantial advantages related to fewer monitoring parameters and drug-drug interactions.124 
+
+Patients with thromboembolic disorders often require a complex regimen of multiple medications, addressing not only the thromboembolic condition but also common comorbid conditions.125 Multiple medications increase the potential for oral anticoagulant drug interactions that significantly influence their efficacy and safety. The underlying interaction mechanism, whether pharmacokinetic or pharmacodynamic, can potentiate or diminish the anticoagulation effects, putting patients at risk for major adverse events like bleeding or stroke.57 
+
+Over time, patients' medication profiles can drastically change, particularly with aging or the development of additional concomitant conditions. There is a paucity of research exploring the longitudinal trends in the incidence and prevalence of drug-drug interactions in patients taking oral anticoagulants. The potential risks associated with these trends are even more understudied. Current research predominantly focuses on individual drug-drug interaction pairs with a limited focus on time-modifying exposure to different interacting drugs.113,114 Additionally, this prior research concentrates on interactions at specific time points, such as therapy initiation and predefined, fixed post-index periods. 
+
+Two studies by Lee et al. used nested case-cohort study designs to evaluate the odds of DOAC exposure relative to a DOAC drug-interaction within 30 days preceding a bleeding event.113,114 While their findings generally suggest increased odds of bleeding in patients exposed to multiple interacting medications, their studies did not account for time-varying covariates or the person-time co-exposed to multiple interacting medications and the downstream impact on incidence rate. This overlooks the dynamic nature of patients' medication regimens over time. 
+
+This study aims to address these gaps through a series of aims focusing on adults who initiate oral anticoagulant therapy. First, we aim to describe potential drug-drug interactions with oral anticoagulants at the initiation of therapy. Second, we will follow patients longitudinally to estimate the incidence of post-index drug-drug interactions and characterize the person-time of concomitant exposure. Third, we will aim to quantify the cumulative risk of bleeding events in patients exposed to drug-drug interactions, overall and as a function of the number of interacting medications. 
+
+# Methods
+
+We will retrospectively analyze a cohort including patients newly initiating an oral anticoagulant (i.e., warfarin, dabigatran, apixaban, rivaroxaban, or edoxaban) between January 1, 2010 and December 31, 2021. Patients will be defined as new users if they have no history of oral anticoagulant use in the 12 months preceding the first dispensing in the study period. The date of each patient's first adjudicated claim for an oral anticoagulant will define the index date. 
+
+## Identify OAC users
+```{r}
+# Retrieve NDCs for OAC drugs
+oac_drug_list <- c("Warf", "Apix", "Rivarox", "Dabig", "Edoxa")
+oac_ndc <- map(oac_drug_list, get_ndc_by_drug_name) |> unlist()
+
+# Process ccae & mdcr datasets using extract_oac_drug_data function
+ccaed_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021.parquet", ndc_filter = oac_ndc)
+
+mdcrd_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021.parquet", ndc_filter = oac_ndc)
+
+# Bind drug files
+all_drug <- bind_rows(ccaed_2009_2021, mdcrd_2009_2021) # 29,000,363 obs
+
+# Save dataset so don't have to do that again
+all_drug |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+
+# Open dataset
+all_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+
+# Save unique IDs of oac users
+all_oac_users <- unique(all_drug_2009_2021$ENROLID) # 2,360,390 users
+
+```
+
+## Clean Drug Data
+```{r}
+# Apply data cleaning functions to oac drug dataset
+cleaned_drug_data <- all_drug_2009_2021 |> 
+  clean_canceling_claims() |> 
+  remove_sequential_pairs() |> 
+  select_max_fill() # 26,909,897 obs
+
+# Save dataset so don't have to do that again
+cleaned_drug_data |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data.parquet")
+
+# Open dataset
+cleaned_drug_data <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data.parquet")
+
+```
+
+
+The study will include adult patients (≥18 years) with at least 12 months of continuous enrollment preceding the index date. Additionally, to avoid complications with attributing events due to prior interacting medications, we will exclude patients with exposure to an interacting medication, based on the day’s supply, in the 60 days preceding the index date. Following the index date, patients will be followed until the earliest of disenrollment from their health or drug plan, switch or discontinuation of the index oral anticoagulant, or the end of the study period. Patient therapy will be considered discontinued upon the occurrence of an observed gap defined as (Day’s supply + (Day’s supply * 0.2)) between the end of a previous oral anticoagulant days' supply and the subsequent fill for an oral anticoagulant. 
+
+## Assign Index Date
+```{r}
+
+#Apply functions to create index dates and age-eligible population
+all_oac_index <- cleaned_drug_data |> 
+  calculate_drug_end_plus_grace(adherence_multiplier = 0.2) |> # Adherence Modifier
+  flag_gaps_and_assign_episodes(gap_allowed = 183) |> # Probably should remove this here. Just going to take first use
+  assign_index_date_and_med() |> 
+  filter_new_users_age(earliest_index_date = '2010-12-01', age_criteria = 18)
+  
+#Extract unique IDs of OAC users meeting criteria  
+all_drug_index_ids <- unique(all_oac_index$ENROLID) #2046098
+
+```
+
+## Evaluate Continuous Enrollment
+```{r}
+# Write parquet file for patients 18+ with index date and ENROLID for CE assessment
+all_oac_index |>
+  arrange(ENROLID, index_date) |> 
+  select(ENROLID, index_date) |> 
+  distinct() |> 
+  write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+
+# Read in dataset with ENROLID & index_date
+cohort_ids_for_CE <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+
+# Extract relevant ENROLIDs for CE assessment
+cont_enrollment_ids <- unique(cohort_ids_for_CE$ENROLID) 
+
+#Open relevant T files for CE scanning; filter for specific ids
+
+load_enrollment_data <- function(path, ids) {
+  open_dataset(path) |>
+    select(ENROLID, DTSTART, DTEND) |> 
+    to_duckdb() |> 
+    filter(ENROLID %in% ids) |> 
+    collect()
+}
+
+ccae_enroll <- load_enrollment_data("//pharm-psop/Truven Data/Truven Data R/ccae/t", cont_enrollment_ids)
+mdcr_enroll <- load_enrollment_data("//pharm-psop/Truven Data/Truven Data R/mdcr/t", cont_enrollment_ids) 
+
+all_enroll <- bind_rows(ccae_enroll, mdcr_enroll) #131847282
+
+# Create parquet file of T datasets with relevant IDs
+all_enroll |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet.parquet") 
+
+# Read parquet file back into the environment
+enrollment_parquet <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet.parquet") 
+
+# Apply Continuous Enrollment function
+continuous_enrollment_result <- ContinuousEnrollment(
+    enrollment_data = enrollment_parquet,
+    data = cohort_ids_for_CE,
+    days_after = 0,
+    days_before = 365,
+    max_gap = 0,
+    index_date_var = index_date
+)  
+
+#Save IDs with CE as vector
+ids_with_ce <- unique(continuous_enrollment_result$ENROLID) #1467834 (25% drop)
+```
+
+
+
+Given each oral anticoagulant has a unique drug-drug interaction profile, the analysis will be constructed to only flag potential interacting medications with the specific index medication. For example, warfarin plus omeprazole would be considered a potential interaction, while dabigatran plus omeprazole would not be. Data permitting, we will analyze the outcomes separately for each oral anticoagulant. A graphical display of the overall study design is presented in Figure 9. 
+
+# Exposure Measurement & Definitions
+
+Pharmacy dispensing data will be used to document oral anticoagulant treatment initiation, subsequent switching of agents, treatment discontinuation, number of days supplied, and concomitant medications at baseline and during follow-up. Medications with days' supply overlapping the oral anticoagulant exposure period will be considered concomitant use. 
+
+We will use Lexicomp drug-drug interaction software and interaction severity rankings to generate separate lists of potential DDI for each oral anticoagulant. Potential drug-drug interactions with category C (monitor therapy), D (consider therapy modification), or X (avoid combination) classifications in Lexicomp will be evaluated. In the analysis, we will also evaluate for the presence of multiple concomitant interactions and will report the person-time co-exposed to 1, 2, and 3+ potential drug-drug interactions.
+
+```{r}
+
+```
+
+# Outcome Measurement
+
+The outcome of interest will be defined as the first occurrence of a hospitalization for a major bleed, defined using previously established criteria.108,126 All outcomes will be identified using algorithms based on the International Classification of Diseases 9th Revision Clinical Modification (ICD-9-CM) codes from 2000-2016 and International Classification of Diseases, 10th Revision, Clinical Modification (ICD-10-CM) codes from 2015-2021. 
+
+The previously validated ICD-9-CM algorithms have demonstrated a positive predictive value of 89-99% and an ability to distinguish specific bleeding sites (i.e., gastrointestinal, cerebral, genitourinary, and other). Outcomes will be ascertained based on hospital discharge diagnoses, with the admission date set as the outcome date. 
+
+```{r}
+# Define a function for event identification and trauma exclusion
+identify_bleed_outcome <- function(dataset_path_s, dataset_path_i, dataset_path_o, output_path_event) {
+  
+# Filter and collect ccaes cases with transfusion in REVCODE 
+transfusion_data <- open_dataset(dataset_path_s) |> 
+  select(ENROLID, YEAR, ADMDATE, DISDATE, REVCODE) |> 
+  to_duckdb() |> 
+  filter(ENROLID %in% ids_with_ce, REVCODE %in% c("0390", "0391")) |> 
+  mutate(transfusion_code = 1) |> #Create var indicating transfusion code 1. Don't care which code it is
+  select(-REVCODE) |> 
+  distinct() |> 
+  collect() #121580 distinct oac users had a transfusion code (~9%)
+
+
+# Collect the full inpatient data with relevant variables
+inpatient_transfusion_data <- open_dataset(dataset_path_i, unify_schemas = TRUE) |> 
+  select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, DXVER, PDX, DX1:DX15, PROC1:PROC15)) |> 
+  to_duckdb() |> 
+  filter(ENROLID %in% ids_with_ce) |>
+  collect() |>  
+  left_join(transfusion_data, by = c("ENROLID", "YEAR", "ADMDATE", "DISDATE")) |> 
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER)) #627789 unique
+
+# Identify patients who meet bleed definition outlined by Dhopshewarkar et al
+inpatient_bleed_data <- inpatient_transfusion_data |> 
+  mutate(
+    bleed_code = if_else(
+      DXVER == 9, 
+      if_any(PDX, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+        (if_any(PDX, ~str_detect(.x, {{all_gib_icd9_possible}})) &
+           (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})) |
+              !is.na(transfusion_code))) | 
+      (if_any(PDX, ~str_detect(.x, {{all_unspec_icd9_possible}})) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}})))) |
+      (if_any(PDX, ~ gu_icd9_possible %in% .x)  &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_icd9_bleeds_ind}}))) &
+         (if_any(DX2:DX15, ~str_detect(.x, {{all_comb_sec}})))),
+      if_else(
+        DXVER == 0, 
+        if_any(PDX, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+          (if_any(PDX, ~str_detect(.x, {{all_gib_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})) |
+                !is.na(transfusion_code))) | 
+          (if_any(PDX, ~str_detect(.x, {{all_unspec_icd10_possible}})) &
+             (if_any(DX2:DX15, ~str_detect(.x, {{all_icd10_bleeds_ind}})))),
+        NA
+      )
+    )
+  ) |>
+  group_by(ENROLID) |> 
+  mutate(bleed_ever = as.integer(any(bleed_code))) |> 
+  filter(bleed_ever == 1) |> 
+  ungroup()
+
+inpatient_trauma <- inpatient_bleed_data |> 
+  mutate(
+    trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX15, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1:PROC15, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  ) |> 
+  select(ENROLID, ADMDATE, DXVER, trauma_code) |> 
+  filter(trauma_code == TRUE) |> 
+  mutate(source = "inpatient") |>  #34762
+  select(ENROLID, ADMDATE)
+
+#Above collects patients who had an inpatient bleed event. Need to pull them into outpatient dataset to search for trauma
+outcome_enrolid <- unique(inpatient_bleed_data$ENROLID)
+
+# Identify trauma in outpatient dataset
+outpatient_trauma <- open_dataset(dataset_path_o, unify_schemas = TRUE) |> 
+  select(ENROLID, SVCDATE, DXVER, DX1, DX2, DX3, DX4, PROC1) |> 
+  to_duckdb() |> 
+  filter(ENROLID %in% outcome_enrolid) |> 
+  collect() |>  #97565595 obs
+  replace_na(list(DXVER = "9")) |> 
+  filter(DXVER != "") |> #removes blanks that probably indicate ambulance services (at this did for 4082398001)
+  mutate(DXVER = as.numeric(DXVER)) |> 
+  mutate(trauma_code = if_else(
+      DXVER == 9,
+      if_any(DX1:DX4, ~str_detect(.x, {{trauma_check_icd9}})) |
+        if_any(PROC1, ~str_detect(.x, {{trauma_hcpcs_all}})), 
+      if_else(
+        DXVER == 0,
+        if_any(DX1:DX4, ~str_detect(.x, {{trauma_check_icd10}})) |
+          if_any(PROC1, ~str_detect(.x, {{trauma_hcpcs_all}})),
+        NA
+      )
+    )
+  ) |>  #97467343 obs
+  select(ENROLID, SVCDATE, DXVER, trauma_code) |> 
+  filter(trauma_code == TRUE) |> 
+  mutate(ADMDATE = SVCDATE, source = "outpatient") |> 
+  select(ENROLID, ADMDATE) #786154 obs
+  
+# Combine trauma codes
+all_trauma_codes <- bind_rows(inpatient_trauma, outpatient_trauma) |> 
+  distinct() |> 
+  arrange(ENROLID, ADMDATE) |>  #238530 obs
+  rename(trauma_date = ADMDATE)
+
+#Join trauma codes with main dataset; identify exclusion events (i.e., those with trauma 1d before through 1d post ADMDATE)
+inpatient_bleed_trauma_merged <- inpatient_bleed_data |> 
+  left_join(all_trauma_codes, by = "ENROLID") |> 
+   mutate(
+    within_window = (ADMDATE - 1 <= trauma_date & trauma_date <= ADMDATE + 1)
+  ) |> # 2087406 obs
+  filter(within_window) |> # 42386 obs
+  distinct(ENROLID, ADMDATE) |> # 39010 obs
+  mutate(exclusion_event = 1) 
+
+
+#Join the dataset back to original dataset and then filter out exclusion events
+bleed_outcome_no_trauma <- inpatient_bleed_data |> 
+  left_join(inpatient_bleed_trauma_merged, by = c("ENROLID", "ADMDATE")) |> 
+  filter(bleed_code == TRUE) |> #305038 obs
+  filter(is.na(exclusion_event)) #20917 unique obs
+
+#Save dataset so don't have to do that again. Need to re-save in correct folder before uploading to github
+bleed_outcome_no_trauma |> write_parquet(output_path_event)
+
+}
+
+#Call function for ccae & mdcr
+ccae_bleed_outcome_no_trauma <- identify_bleed_outcome(
+  dataset_path_s = "//pharm-psop/Truven Data/Truven Data R/ccae/s",
+  dataset_path_i = "//pharm-psop/Truven Data/Truven Data R/ccae/i",
+  dataset_path_o = "//pharm-psop/Truven Data/Truven Data R/ccae/o",
+  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+
+mdcr_bleed_outcome_no_trauma <- identify_bleed_outcome(
+  dataset_path_s = "//pharm-psop/Truven Data/Truven Data R/mdcr/s",
+  dataset_path_i = "//pharm-psop/Truven Data/Truven Data R/mdcr/i",
+  dataset_path_o = "//pharm-psop/Truven Data/Truven Data R/mdcr/o",
+  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+
+
+#Open datasets
+ccae_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+
+mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+
+#Merge event files
+all_outcome <- bind_rows(ccae_bleed_outcome_no_trauma, mdcr_bleed_outcome_no_trauma) |> 
+  arrange(ENROLID, ADMDATE) |> 
+  group_by(ENROLID) |> 
+  mutate(hospnum = row_number()) |> 
+  ungroup() |> 
+  mutate(eventnum= row_number()) |> 
+  select(c(ENROLID, ADMDATE, DAYS, DISDATE, hospnum, eventnum)) 
+
+all_outcome |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+
+all_inpatient_bleed_no_trauma <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+
+#Create vector that includes ENROLID of all individuals who experienced outcome in 2009-2021
+#outcome_vec <- all_inpatient_bleed_no_trauma$ENROLID #1297106
+
+#Shouldn't this be distinct obs? 
+outcome_vec <- unique(all_inpatient_bleed_no_trauma$ENROLID) #68485
+```
+
+
+# Statistical Analysis
+
+Concomitant medication use data will be collected and reported at the individual interacting medication level and the class level defined using Redbook's Therapeutic Group and Therapeutic Class information. In the post-index period, concomitant medication use will be reported as the total number of interacting prescription fills, the total number of patients filling at least one medication in the period, and the number of person-days concomitantly exposed.
+
+Demographic and clinical characteristics of the cohort will be presented using descriptive statistics stratified by the index oral anticoagulant. The mean and median per patient number of interacting medications used over the post-index period will be reported along with the mean and median person time of exposure to 1, 2, and 3 or more interacting medications. Medications containing multiple active ingredients will be analyzed by individual ingredients.
+
+Covariates will be measured in the 12-month baseline period and throughout follow-up. Potential confounders will be identified based on existing literature and expert clinical knowledge. For each patient, we will structure the data so that there is one record per person-month, including data on the number of interacting medications, relevant confounders, and the presence or absence of a bleeding event coded as a binary outcome. Time-dependent variables will be created for each patient to track the number of interacting drugs they are exposed to at each time point. We will calculate stabilized inverse probability weights for each observation using logistic regression at each time point to account for the identified time-varying confounders and exposures and differential censoring. Each time there is either a) a change in exposure,  b) a change in covariate status, or c) loss to follow-up, the inverse probability weights will be updated. Using this data, a marginal structural model will be fit to estimate the cumulative risk of bleeding events as a function of the number of interacting drugs. All cohort construction, analyses, tables, and figure generation will be conducted using R software (version 4.2.3 R Core Team, 2023). A more detailed overview of marginal structural models is included below.
