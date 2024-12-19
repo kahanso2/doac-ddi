@@ -21,6 +21,13 @@ redbook <- open_dataset("//pharm-psop/Truven Data/Truven Data R/redbook.parquet"
 
 options(scipen = 999)
 
+redbook_distinct <- redbook |> distinct(GENNME)
+
+#write.xlsx(redbook_distinct, file = "redbook_drug_names.xlsx", sheetName = "drug_names", append = FALSE)
+
+potential_oac_ddi <- read_excel("C:/Users/kahanso2/Documents/doac-ddi/scary aim/resources/oac_ddi_lexicomp.xlsx", sheet = "combined_dd_list")
+
+
 ```
 
 # Introduction
@@ -46,18 +53,18 @@ oac_drug_list <- c("Warf", "Apix", "Rivarox", "Dabig", "Edoxa")
 oac_ndc <- map(oac_drug_list, get_ndc_by_drug_name) |> unlist()
 
 # Process ccae & mdcr datasets using extract_oac_drug_data function
-ccaed_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/ccaed_2009_2021.parquet", ndc_filter = oac_ndc)
+ccaed_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/ccaed_2009_2021.parquet", ndc_filter = oac_ndc)
 
-mdcrd_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcrd_2009_2021.parquet", ndc_filter = oac_ndc)
+mdcrd_2009_2021 <- extract_oac_drug_data (dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d", output_path = "C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/mdcrd_2009_2021.parquet", ndc_filter = oac_ndc)
 
 # Bind drug files
 all_drug <- bind_rows(ccaed_2009_2021, mdcrd_2009_2021) # 29,000,363 obs
 
 # Save dataset so don't have to do that again
-all_drug |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+all_drug |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/all_drug_2009_2021.parquet")
 
 # Open dataset
-all_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_drug_2009_2021.parquet")
+all_oac_drug_2009_2021 <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/all_drug_2009_2021.parquet")
 
 # Save unique IDs of oac users
 all_oac_users <- unique(all_drug_2009_2021$ENROLID) # 2,360,390 users
@@ -73,15 +80,18 @@ cleaned_drug_data <- all_drug_2009_2021 |>
   select_max_fill() # 26,909,897 obs
 
 # Save dataset so don't have to do that again
-cleaned_drug_data |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data.parquet")
+cleaned_drug_data |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/cleaned_drug_data.parquet")
 
 # Open dataset
-cleaned_drug_data <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/cleaned_drug_data.parquet")
+cleaned_drug_data <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/cleaned_drug_data.parquet")
+
 
 ```
 
 
 The study will include adult patients (≥18 years) with at least 12 months of continuous enrollment preceding the index date. Additionally, to avoid complications with attributing events due to prior interacting medications, we will exclude patients with exposure to an interacting medication, based on the day’s supply, in the 60 days preceding the index date. Following the index date, patients will be followed until the earliest of disenrollment from their health or drug plan, switch or discontinuation of the index oral anticoagulant, or the end of the study period. Patient therapy will be considered discontinued upon the occurrence of an observed gap defined as (Day’s supply + (Day’s supply * 0.2)) between the end of a previous oral anticoagulant days' supply and the subsequent fill for an oral anticoagulant. 
+
+We will use Lexicomp drug-drug interaction software and interaction severity rankings to generate separate lists of potential DDI for each oral anticoagulant. Potential drug-drug interactions with category C (monitor therapy), D (consider therapy modification), or X (avoid combination) classifications in Lexicomp will be evaluated. In the analysis, we will also evaluate for the presence of multiple concomitant interactions and will report the person-time co-exposed to 1, 2, and 3+ potential drug-drug interactions.
 
 ## Assign Index Date
 ```{r}
@@ -89,12 +99,17 @@ The study will include adult patients (≥18 years) with at least 12 months of c
 #Apply functions to create index dates and age-eligible population
 all_oac_index <- cleaned_drug_data |> 
   calculate_drug_end_plus_grace(adherence_multiplier = 0.2) |> # Adherence Modifier
-  flag_gaps_and_assign_episodes(gap_allowed = 183) |> # Probably should remove this here. Just going to take first use
+  flag_gaps_and_assign_episodes(gap_allowed = 365) |> # Probably should remove this here. Just going to take first use
   assign_index_date_and_med() |> 
-  filter_new_users_age(earliest_index_date = '2010-12-01', age_criteria = 18)
-  
+  filter_new_users_age(earliest_index_date = '2010-01-01', age_criteria = 18)|> 
+  group_by(ENROLID) %>%
+  filter(episode_number == min(episode_number)) %>% #only allows for minimum episode number for each person (no re-entry)
+  ungroup() 
+
+
 #Extract unique IDs of OAC users meeting criteria  
-all_drug_index_ids <- unique(all_oac_index$ENROLID) #2046098
+all_drug_index_ids <- unique(all_oac_index$ENROLID) #1754129
+
 
 ```
 
@@ -105,13 +120,13 @@ all_oac_index |>
   arrange(ENROLID, index_date) |> 
   select(ENROLID, index_date) |> 
   distinct() |> 
-  write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+  write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/ids_with_indexdate.parquet")
 
 # Read in dataset with ENROLID & index_date
-cohort_ids_for_CE <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ids_with_indexdate.parquet")
+cohort_ids_for_CE <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/ids_with_indexdate.parquet")
 
 # Extract relevant ENROLIDs for CE assessment
-cont_enrollment_ids <- unique(cohort_ids_for_CE$ENROLID) 
+cont_enrollment_ids <- unique(cohort_ids_for_CE$ENROLID)  
 
 #Open relevant T files for CE scanning; filter for specific ids
 
@@ -129,10 +144,10 @@ mdcr_enroll <- load_enrollment_data("//pharm-psop/Truven Data/Truven Data R/mdcr
 all_enroll <- bind_rows(ccae_enroll, mdcr_enroll) #131847282
 
 # Create parquet file of T datasets with relevant IDs
-all_enroll |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet.parquet") 
+all_enroll |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/enrollment_parquet.parquet") 
 
 # Read parquet file back into the environment
-enrollment_parquet <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/enrollment_parquet.parquet") 
+enrollment_parquet <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/enrollment_parquet.parquet") 
 
 # Apply Continuous Enrollment function
 continuous_enrollment_result <- ContinuousEnrollment(
@@ -145,22 +160,343 @@ continuous_enrollment_result <- ContinuousEnrollment(
 )  
 
 #Save IDs with CE as vector
-ids_with_ce <- unique(continuous_enrollment_result$ENROLID) #1467834 (25% drop)
+ids_with_ce <- unique(continuous_enrollment_result$ENROLID) #1070453 (40% drop)
 ```
 
-
-
-Given each oral anticoagulant has a unique drug-drug interaction profile, the analysis will be constructed to only flag potential interacting medications with the specific index medication. For example, warfarin plus omeprazole would be considered a potential interaction, while dabigatran plus omeprazole would not be. Data permitting, we will analyze the outcomes separately for each oral anticoagulant. A graphical display of the overall study design is presented in Figure 9. 
-
-# Exposure Measurement & Definitions
-
-Pharmacy dispensing data will be used to document oral anticoagulant treatment initiation, subsequent switching of agents, treatment discontinuation, number of days supplied, and concomitant medications at baseline and during follow-up. Medications with days' supply overlapping the oral anticoagulant exposure period will be considered concomitant use. 
-
-We will use Lexicomp drug-drug interaction software and interaction severity rankings to generate separate lists of potential DDI for each oral anticoagulant. Potential drug-drug interactions with category C (monitor therapy), D (consider therapy modification), or X (avoid combination) classifications in Lexicomp will be evaluated. In the analysis, we will also evaluate for the presence of multiple concomitant interactions and will report the person-time co-exposed to 1, 2, and 3+ potential drug-drug interactions.
+# Apply exclusion criteria for prior interacting drug use
 
 ```{r}
+# Function to get full list of drugs used by patients in cohort
+process_dataset <- function(dataset_path) {
+  drug_data <- open_dataset(dataset_path) |> 
+    select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP))|>
+    to_duckdb() |> 
+    filter(ENROLID %in% ids_with_ce) |> 
+    collect()
+  
+  dataset_names <- drug_data |> 
+    left_join(redbook, by = "NDCNUM") |>  
+    select(c(ENROLID, NDCNUM, SVCDATE, YEAR, AGE, SEX, DAYSUPP, THRDTDS, GENNME, MASTFRM, MSTFMDS, ROADS, DEACLDS)) 
+  
+  return(dataset_names)
+}
+
+# Process ccae & mdcr datasets
+ccaed_2009_2021_full <- process_dataset(dataset_path = "//pharm-psop/Truven Data/Truven Data R/ccae/d")
+mdcrd_2009_2021_full <- process_dataset(dataset_path = "//pharm-psop/Truven Data/Truven Data R/mdcr/d")
+
+#Bind drug files
+all_drug_full <- bind_rows(ccaed_2009_2021_full, mdcrd_2009_2021_full) 
+
+
+
+all_drug_full |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/all_drug_full.parquet")
+
+all_drug_full <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/all_drug_full.parquet") 
+
+all_drug_full_noGENNME <- all_drug_full |> 
+  filter(is.na(GENNME)) |> 
+  distinct(NDCNUM)
+
+# Add a new column with generic names
+all_drug_full_noGENNME$generic_name <- sapply(all_drug_full_noGENNME$NDCNUM, get_generic_name) |> 
+  str_to_title()
+
+all_drug_full_noGENNME_1 <- all_drug_full_noGENNME |> 
+  mutate(route = if_else(str_detect(generic_name, "Oral|Tablet|Capsule|Chewable"), "Oral", NA)) |> 
+  mutate(route = if_else(str_detect(generic_name, "Topical|Lotion|Cream"), "Topical application", route)) |> 
+  mutate(route = if_else(str_detect(generic_name,"Injectable|Prefilled Syringe|Injection"), "Injectable", route)) |> 
+  mutate(route = if_else(str_detect(generic_name,"Transdermal"), "Transdermal", route)) |> 
+  mutate(route = if_else(str_detect(generic_name,"Ophthalmic"), "Ophthalmic", route)) |> 
+  mutate(route = if_else(str_detect(generic_name,"Otic"), "Otic", route)) |> 
+  mutate(dea = "TBD") #setting to 1 for now. will be errant, but can evaluate later down
+
+
+# join back to original dataset
+all_drug_full_2 <- all_drug_full |> 
+  left_join(all_drug_full_noGENNME_1, by = "NDCNUM") |> 
+  mutate(GENNME = if_else(is.na(GENNME), generic_name, GENNME)) |> 
+  mutate(ROADS = if_else(is.na(ROADS), route, ROADS)) |> 
+  mutate(DEACLDS = if_else(is.na(DEACLDS), dea, DEACLDS))
+
+
+# Use mapping to get common drug names (remove abbreviations) - do on individual datasets - very slow
+
+# Create a dataframe with the given abbreviations and definitions
+abbreviation_data <- data.frame(
+  Abbreviation = c(
+    "APAP", "ETOH", "Al Hydroxide", "Vit C", "Vitamin C", "buPROPion",
+    "Caff/", "Ca Carbonate", "Chondroitin/", "Chondroitin Sulf/",
+    "HC Ace", "Mg Hydroxide", "Mg Ace", "Mg Cl", "Mg Oxybate",
+    "Mg Sulf", "Mg/", "/Medroxyp", "Methyl Sal", "/Omega-3",
+    "/Phenobarb", "Na Bicarb", ";Tetracyc", "Vit E", "alpha Tocopherol",
+    "d-Alpha Tocopheryl Acid Succinate", "Dasabuvir;Ombitasvir/Paritaprevir/Ritonavir", "Venetoclax;Venetoclax;Venetoclax", "Milnacipran Hydrochloride;Milnacipran Hydrochlorid", "Aspirin 81 Mg Delayed Release Oral Tablet [Bayer Aspirin]", "Vilazodone Hydrochloride;Vilazodone Hydrochloride", "Levomilnacipran Hydrochloride;Levomilnacipran Hydr", "Vilazodone HCl;Vilazodone HCl;Vilazodone HCl"
+  ),
+  Definition = c(
+    "Acetaminophen", "Ethanol", "Aluminum Hydroxide", "Ascorbic Acid", "Ascorbic Acid",
+    "Bupropion", "Caffeine/", "Calcium Carbonate", "Chondroitin Sulfate", "Chondroitin Sulfate",
+    "Hydrocortisone Acetate", "Magnesium Hydroxide", "Magnesium Acetate", "Magnesium Chloride",
+    "Magnesium Oxybate", "Magnesium Sulfate", "Magnesium/", "/Medroxyprogesterone",
+    "Methyl Salicylate", "Omega-3 Fatty Acids", "/Phenobarbital", "Sodium Bicarbonate",
+    ";Tetracycline", "Vitamin E", "Vitamin E", "Vitamin E", 
+    "Dasabuvir/Ombitasvir/Paritaprevir/Ritonavir", "Venetoclax", "Milnacipran Hydrochloride", "Aspirin 81 Mg DR Oral Tablet", "Vilazodone Hydrochloride", "Levomilnacipran Hydrochloride", "Vilazodone Hydrochloride"
+  ),
+  stringsAsFactors = FALSE
+) 
+
+# test3 |> 
+#   filter(num_interacting_drugs > 1) |> 
+#   distinct(GENNME)
+
+# Create dabigatran cohort & save ids
+dabigatran_cohort <- all_oac_index |> 
+  filter(ENROLID %in% ids_with_ce) |> 
+  filter(index_med == "Dabigatran Etexilate Mesylate") #663309
+
+dabigatran_cohort_ids <- unique(dabigatran_cohort$ENROLID) #55669
+
+# Join the full drug file to dabigatran users
+dabigatran_cohort_index <- dabigatran_cohort |> 
+  select(ENROLID, index_date) |>
+  distinct() |> 
+  left_join(all_drug_full_2, by = "ENROLID") #12328437
+
+
+  
+# Replace abbreviations in GENNME with definitions
+for (i in seq_len(nrow(abbreviation_data))) {
+  abbreviation <- abbreviation_data$Abbreviation[i]
+  definition <- abbreviation_data$Definition[i]
+  
+  # Replace matching abbreviations with the definition
+  test1 <- dabigatran_cohort_index |> 
+    mutate(
+      GENNME = if_else(
+        str_detect(GENNME, regex(abbreviation, ignore_case = TRUE)),
+        str_replace_all(GENNME, regex(abbreviation, ignore_case = TRUE), definition),
+        GENNME
+      )
+    )
+}
+
+test1a <- test1 |> 
+  clean_canceling_claims() |> 
+  remove_sequential_pairs() |> 
+  select_max_fill()
+  
+  
+# create drug end variable and exposure in past 60 day variable
+test2 <- test1a |> 
+  mutate(
+    drug_end_date = SVCDATE + DAYSUPP,
+    exposure_in_60_days = (SVCDATE >= (index_date - 60) & SVCDATE <= index_date) | 
+                          (drug_end_date >= (index_date - 60) & drug_end_date <= index_date))
+
+# create vector of ddi drugs
+dabigatran_ddi <- potential_oac_ddi |> 
+  clean_names() |> 
+  filter(dabigatran == 1) 
+
+dabigatran_ddi_vector <- (dabigatran_ddi$new_name) |> 
+  paste(collapse = "|")
+
+
+# evaluate if exposure to interacting drugs from list
+test3 <- test2 |> 
+  mutate(num_interacting_drugs = str_count(GENNME, dabigatran_ddi_vector), 
+         exposure_flag = num_interacting_drugs > 0) # after this, there will be problems to resolve. Example: venetoclax; venatoclax = 2. identify and fix high up. will need to repeat for each drug, bt fixing high up should make process easier later. 
+
+test3_1 <- test3 |> 
+  mutate(rna = if_else(ROADS == "Route Not Applicable", 1, 0)) |> 
+  mutate(dea = if_else(DEACLDS == "OTC", 1, 0)) |> 
+  mutate(topical = if_else(ROADS == "Topical application" & !str_detect(GENNME,regex("Piroxicam|Ibuprofen|Diclofenac|Flurbiprofen|Miconazole|Nifedipine")), 1, 0)) |> 
+  mutate(ophthalmic = if_else(ROADS == "Ophthalmic" &  !str_detect(GENNME, regex("Diclofenac|Flurbiprofen|Ketorolac")), 1, 0)) |> 
+  mutate(ignore_route = if_else(ROADS %in% c("Multiple Routes", "Otic", "Urinary bladder", "Vaginal", "Intraocular", "Urethral", "Intracavernosal", "Intradermal", "Irrigation", "Intrauterine", "Gingival", "Dental"), 1, 0))  
+
+test3_2 <- test3_1 |> 
+  mutate(remove_flag = if_else(exposure_flag == TRUE & exposure_in_60_days == TRUE & rna == 0 & dea == 0 & topical == 0 & ophthalmic == 0 & ignore_route == 0, 1, 0))  |> 
+  group_by(ENROLID) |>
+  mutate(remove_flag_2 = max(remove_flag, na.rm = TRUE)) |>
+  ungroup() |> 
+  filter(remove_flag_2 == 0)
+
+#wow it works. lose alot
+missing_ndc_gennme <- test3_2 |> 
+  filter(is.na(remove_flag)) |> 
+  distinct(NDCNUM)
+
+test <- test3_2 |> filter(remove_flag == 1) |> distinct(GENNME, .keep_all = TRUE)
+
+ids_without_prior_ddi <- unique(test3_2$ENROLID)
+        
+
 
 ```
+
+# Cool code that looks at RxNorm to generate NDC codes for the missings here - move above or to functions
+```{r}
+library(httr)
+library(jsonlite)
+
+# Define a function to get the generic name for an NDC code
+get_generic_name <- function(ndc) {
+  # Format the URL with the NDC code
+  base_url <- paste0("https://rxnav.nlm.nih.gov/REST/ndcstatus.json?ndc=", ndc)
+  
+  # Make the GET request to the API
+  response <- GET(base_url)
+  
+  # Check if the request was successful
+  if (status_code(response) == 200) {
+    # Parse the JSON response
+    data <- fromJSON(content(response, "text"))
+    
+    # Extract the generic name
+    generic_name <- data$ndcStatus$conceptName
+    
+    # Return the generic name or "Unknown" if not found
+    return(ifelse(is.null(generic_name), "Unknown", generic_name))
+  } else {
+    # Return an error message if the request failed
+    return("Error")
+  }
+}
+
+# Test the function with an example NDC code
+example_ndc <- "67544009794"  # Replace with your NDC code
+generic_name <- get_generic_name(example_ndc)
+print(paste("NDC:", example_ndc, "- Generic Name:", generic_name))
+
+# Now apply to full list of ndcs
+
+
+# Add a new column with generic names
+missing_ndc_gennme$generic_name <- sapply(missing_ndc_gennme$NDCNUM, get_generic_name)
+
+
+# join back to original dataset
+test3_3 <- test3_2 |> 
+  left_join(missing_ndc_gennme, by = "NDCNUM") |> 
+  mutate(GENNME = if_else(is.na(GENNME), generic_name, GENNME)) 
+
+test3_3|> 
+  filter(!is.na(generic_name))
+
+test3_2 |> 
+  filter(ENROLID == 121301)
+```
+
+
+# Censoring Criteria - pasting in old stuff under this and above revisit
+```{r}
+# Add in date of disenrollment, date of discontinuation/switch, date of end of study period, and date of event (if applicable) 
+
+
+
+# Apply continuous exposure rules
+
+# Gotta figure out how to implement this. 
+
+# Function to apply continuous exposure rule (i.e., identify when exposure ends )
+apply_continuous_exposure_rules <- function(data, outcome_ids) {
+  
+# ggplot(dabigatran_cohort, aes(x = days_since_last)) +
+#   geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+#   labs(title = "Histogram of Days Since Last",
+#        x = "Days Since Last",
+#        y = "Count")  +
+#   coord_cartesian(xlim = c(-50, 50)) +  # Adjust range here
+#   theme_minimal()
+  
+  
+  
+  #Step 2: Apply continuous exposure logic
+  continuous_exposure_data <- dabigatran_cohort |> 
+    group_by(ENROLID, episode_number) |> #  everyone only has 1 episode number in the dabig_cohort. keeping for ease w/ other analysis
+    mutate(
+      obj_end_lagged = lag(drug_end_plus_grace), # lag the previous drug end date + the grace period
+      cont_expo1 = if_else(SVCDATE <= obj_end_lagged, "Continuous", "New" ),  #Flag if next fill falls outside grace period
+      cont_expo2 = if_else(is.na(cont_expo1), "New", cont_expo1),  #Change first fill values (currently NA) to "New"
+      censor_disc = if_else(cont_expo1=="New" & cont_expo2 == "New", 1, NA), 
+      censor_disc_date = if_else(censor_disc == 1, obj_end_lagged, NA),
+      censor_switch = if_else(oac_switch == "switch", 1, NA), 
+      censor_switch_date = if_else(censor_switch == 1, SVCDATE, NA)) |>   #Filter if "New", "New". Occurs if new start that isnt 1st fill
+    mutate(
+    censor_disc_date = min(censor_disc_date, na.rm = TRUE),  # Get the first date within group
+    censor_switch_date = min(censor_switch_date, na.rm = TRUE)) |> 
+  ungroup() |> 
+    arrange(ENROLID, SVCDATE) |> 
+    distinct(ENROLID, .keep_all = TRUE)
+  
+  return(continuous_exposure_data)
+}
+
+# Apply function to index dataset - doesnt work yet.
+oac_users <- apply_continuous_exposure_rules(all_oac_index, outcome_vec)
+
+
+## Extract unique ENROLIDs
+oac_user_ids <- unique(continuous_exposure_data$ENROLID) #55669
+
+
+```
+
+
+#Chunk to evaluate stop of follow-up (disenrollment)
+```{r}
+
+# Function to evaluate disenrollment (i.e., censor at gap in enrollment)
+evaluate_disenrollment <- function(enrollment_data, user_ids) {
+  
+  #Step 1: Calculate gaps and flag when disenrollment occurs
+  disenrollment_data <- enrollment_parquet |> 
+  filter(ENROLID %in% oac_user_ids) |> 
+  select(ENROLID, DTSTART, DTEND) |> 
+  arrange(ENROLID, DTSTART) |> 
+  group_by(ENROLID) |> 
+  mutate(
+    PreviousEndDate = lag(DTEND),
+    GapDays = as.integer(DTSTART - PreviousEndDate)) |>  # Get prior DTEND and calculate gap b/n DTSTART
+  ungroup() |> 
+  left_join(continuous_exposure_data, by = "ENROLID") |> #Join with dataset w/ observation start time
+  group_by(ENROLID, episode_number) |> 
+  mutate(flag = if_else(DTSTART < index_date - 30, 1, 0)) |> #Flag to identify if DTSTART is 30d before index
+  filter(flag == 0) |> # filters those patients out
+  mutate(
+    censor_dt = if_else(GapDays > 30 & PreviousEndDate > index_date, 1, 0),  #Creates censoring variable gap >30d & prior end date is after index
+    censor_dt = cummax(censor_dt) # Propagate the censor flag to all subsequent rows
+  ) |> 
+  filter(censor_dt == 0) |> 
+  mutate(lost_ce_dt = max(DTEND)) |> #Use max date populate all rows with day of disenrollment
+  ungroup() |> 
+  distinct(ENROLID, index_date, lost_ce_dt) 
+
+  # Step 2: Update the follow-up period based on disenrollment
+  updated_cohort <- continuous_exposure_data |> 
+    left_join(disenrollment_data, by = c("ENROLID", "index_date")) |> 
+    mutate(
+    # Replace Inf with NA to ensure correct minimum calculation
+    censor_disc_date_clean = if_else(is.infinite(censor_disc_date), NA, censor_disc_date),
+    censor_switch_date_clean = if_else(is.infinite(censor_switch_date), NA, censor_switch_date),
+    lost_ce_date_clean = if_else(is.infinite(lost_ce_dt), NA, lost_ce_dt),
+    
+    # Calculate the minimum date across the three cleaned columns
+    censoring_date = pmin(censor_disc_date_clean, censor_switch_date_clean, lost_ce_date_clean, na.rm = TRUE))
+  
+  return(updated_cohort)
+}
+
+# Apply function - doesnt work yet.
+cohort_oac_users_with_ce_update <- evaluate_disenrollment(enrollment_parquet, oac_user_ids)
+
+cohort_no_outcome <- updated_cohort |> 
+  select(ENROLID:index_med, censoring_date) |> 
+  filter(ENROLID %in% ids_without_prior_ddi)
+
+cohort_no_outcome_vector <- cohort_no_outcome$ENROLID
+```
+
+# Build in Outcome
 
 # Outcome Measurement
 
@@ -176,7 +512,7 @@ identify_bleed_outcome <- function(dataset_path_s, dataset_path_i, dataset_path_
 transfusion_data <- open_dataset(dataset_path_s) |> 
   select(ENROLID, YEAR, ADMDATE, DISDATE, REVCODE) |> 
   to_duckdb() |> 
-  filter(ENROLID %in% ids_with_ce, REVCODE %in% c("0390", "0391")) |> 
+  filter(ENROLID %in% cohort_no_outcome_vector, REVCODE %in% c("0390", "0391")) |> 
   mutate(transfusion_code = 1) |> #Create var indicating transfusion code 1. Don't care which code it is
   select(-REVCODE) |> 
   distinct() |> 
@@ -187,7 +523,7 @@ transfusion_data <- open_dataset(dataset_path_s) |>
 inpatient_transfusion_data <- open_dataset(dataset_path_i, unify_schemas = TRUE) |> 
   select(c(ENROLID, YEAR, ADMDATE, AGE, DAYS, DISDATE, DXVER, PDX, DX1:DX15, PROC1:PROC15)) |> 
   to_duckdb() |> 
-  filter(ENROLID %in% ids_with_ce) |>
+  filter(ENROLID %in% cohort_no_outcome_vector) |>
   collect() |>  
   left_join(transfusion_data, by = c("ENROLID", "YEAR", "ADMDATE", "DISDATE")) |> 
   replace_na(list(DXVER = "9")) |> 
@@ -306,19 +642,19 @@ ccae_bleed_outcome_no_trauma <- identify_bleed_outcome(
   dataset_path_s = "//pharm-psop/Truven Data/Truven Data R/ccae/s",
   dataset_path_i = "//pharm-psop/Truven Data/Truven Data R/ccae/i",
   dataset_path_o = "//pharm-psop/Truven Data/Truven Data R/ccae/o",
-  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/ccae_bleed_outcome_no_trauma.parquet")
 
 mdcr_bleed_outcome_no_trauma <- identify_bleed_outcome(
   dataset_path_s = "//pharm-psop/Truven Data/Truven Data R/mdcr/s",
   dataset_path_i = "//pharm-psop/Truven Data/Truven Data R/mdcr/i",
   dataset_path_o = "//pharm-psop/Truven Data/Truven Data R/mdcr/o",
-  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+  output_path_event = "C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/mdcr_bleed_outcome_no_trauma.parquet")
 
 
 #Open datasets
-ccae_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/ccae_bleed_outcome_no_trauma.parquet")
+ccae_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/ccae_bleed_outcome_no_trauma.parquet")
 
-mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/mdcr_bleed_outcome_no_trauma.parquet")
+mdcr_bleed_outcome_no_trauma <- read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/mdcr_bleed_outcome_no_trauma.parquet")
 
 #Merge event files
 all_outcome <- bind_rows(ccae_bleed_outcome_no_trauma, mdcr_bleed_outcome_no_trauma) |> 
@@ -329,16 +665,380 @@ all_outcome <- bind_rows(ccae_bleed_outcome_no_trauma, mdcr_bleed_outcome_no_tra
   mutate(eventnum= row_number()) |> 
   select(c(ENROLID, ADMDATE, DAYS, DISDATE, hospnum, eventnum)) 
 
-all_outcome |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+all_outcome |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/all_inpatient_bleed_no_trauma.parquet")
 
-all_inpatient_bleed_no_trauma <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/data/all_inpatient_bleed_no_trauma.parquet")
+all_outcome <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/all_inpatient_bleed_no_trauma.parquet")
 
-#Create vector that includes ENROLID of all individuals who experienced outcome in 2009-2021
-#outcome_vec <- all_inpatient_bleed_no_trauma$ENROLID #1297106
 
-#Shouldn't this be distinct obs? 
-outcome_vec <- unique(all_inpatient_bleed_no_trauma$ENROLID) #68485
 ```
+
+#load in when event occurs
+```{r}
+
+
+cohort_with_outcome <- cohort_no_outcome |> 
+  left_join(all_outcome, by = "ENROLID") |> 
+  mutate(event_during_follow_up = if_else(ADMDATE > index_date & ADMDATE < censoring_date, 1, 0)) |> 
+  mutate(event_pre_index = if_else(ADMDATE <= index_date, 1, 0)) |>
+  mutate(event_1y_pre_index = if_else(ADMDATE > index_date - 365 & ADMDATE <= index_date, 1, 0)) |> 
+  mutate(event_post_index = if_else(ADMDATE > index_date, 1, 0))
+  
+cohort_with_outcome |> 
+  count(event_pre_index)
+
+# When merge in drug data it will be many:many. Not going to remove people with pre-index event (for now)
+# Let's assume we stop follow-up at first event post-index
+
+cohort_with_outcome_2 <- cohort_with_outcome |> 
+  mutate(event_date = if_else(event_during_follow_up == 1, ADMDATE, as.Date(NA))) |> 
+  group_by(ENROLID) |> 
+  mutate(first_post_index_event_during_follow_up = min(event_date, na.rm = TRUE)) |>  # Get first event date
+  ungroup() |>  # Remove grouping
+  mutate(first_post_index_event_during_follow_up = if_else(first_post_index_event_during_follow_up == Inf, NA, first_post_index_event_during_follow_up)) |> 
+  distinct(ENROLID, .keep_all = TRUE)
+
+cohort_with_outcome_2 <- cohort_with_outcome |> 
+  mutate(event_date = if_else(event_during_follow_up == 1, ADMDATE, as.Date(NA))) |>  # Flag event date or NA
+  group_by(ENROLID) |> 
+  summarise(
+    first_post_index_event_during_follow_up = if (all(is.na(event_date))) as.Date(NA) else min(event_date, na.rm = TRUE),
+    .groups = "drop"  # Remove grouping after summarization
+  ) 
+
+cohort_with_outcome_3 <- cohort_with_outcome |> 
+  left_join(cohort_with_outcome_2, by = "ENROLID") |>  # Bring back original columns if needed
+  distinct(ENROLID, .keep_all = TRUE)  # Keep only one row per ENROLID
+
+
+```
+
+# Merge in the drug data
+
+```{r}
+concomitant_med_dataset <- cohort_with_outcome_3 |> 
+  select(ENROLID, index_date, index_med, censoring_date, ADMDATE, DAYS, DISDATE, event_during_follow_up:first_post_index_event_during_follow_up) |> 
+  left_join(test3_2, by = c("ENROLID", "index_date")) |> 
+  mutate(follow_up_end = pmin(censoring_date, first_post_index_event_during_follow_up, na.rm = TRUE)) |> 
+  mutate(fill_post_follow_up_end = if_else(SVCDATE > follow_up_end, 1, 0)) |> 
+  filter(fill_post_follow_up_end == 0) |> 
+  mutate(fill_1y_pre_index = if_else(SVCDATE > index_date - 365 & SVCDATE <= index_date, 1, 0)) |> 
+  filter(fill_1y_pre_index == 0)
+
+# add in flag for interacting medication
+
+interacting_med_database <- concomitant_med_dataset |> 
+  mutate(exposure_during_follow_up = if_else(SVCDATE > index_date & SVCDATE < censoring_date, 1, 0)) |> 
+  mutate(interaction = if_else(exposure_flag == TRUE & exposure_during_follow_up == 1 & rna == 0 & dea == 0 & topical == 0 & ophthalmic == 0 & ignore_route == 0, 1, 0)) |> 
+  mutate(end_exposure = SVCDATE + DAYSUPP) |> 
+  mutate(DDI_start = if_else(interaction == 1, SVCDATE, NA)) |> 
+  mutate(DDI_end = if_else(interaction == 1, SVCDATE + DAYSUPP, NA))
+  
+# Need to figure out how to count number of drugs exposed to on a given day
+```
+
+# here we go...
+```{r}
+patient_days <- interacting_med_database |> 
+  distinct(ENROLID, index_date, follow_up_end) |> 
+  rowwise() |> 
+  mutate(days_seq = list(seq(index_date, follow_up_end, by = "day"))) |>  # Generate sequence of days
+  unnest(days_seq) |>  # Expand to long format (one row per day)
+  rename(day = days_seq) |> 
+  ungroup()
+
+patient_days_with_drugs <- patient_days |> 
+  left_join(interacting_med_database, by = c("ENROLID" = "ENROLID", "day" = "SVCDATE"))
+
+
+
+#Above doesnt work because it only does fill date. I need the window of exposure.
+
+drug_exposure_days <- interacting_med_database |> 
+  select(ENROLID, index_date, follow_up_end, GENNME, DDI_start, DDI_end) |> 
+  rowwise() |> 
+  mutate(
+    exposure_days = if (!is.na(DDI_start) & !is.na(DDI_end)) {
+      list(seq(DDI_start, DDI_end, by = "day"))
+    } else {
+      list(NULL)  # No sequence for NA values
+    }
+  ) |> 
+  unnest(exposure_days) |>  # Expand to long format
+  rename(day = exposure_days) |>  # Rename for joining
+  ungroup()
+
+
+
+aaa <- drug_exposure_days  |> 
+  group_by(ENROLID, day) |> 
+  summarise(interacting_drug_count = n_distinct(GENNME, na.rm = TRUE), .groups = "drop") 
+
+#need to like merge back to mega list or something. losing events for the 0s i think
+b <- patient_days |> 
+  left_join(aaa, by = c("ENROLID" = "ENROLID", "day" = "day")) |> 
+  mutate(interacting_drug_count = if_else(is.na(interacting_drug_count), 0, interacting_drug_count)) |> 
+  mutate(Exposure_Level = case_when(
+    interacting_drug_count == 0 ~ "0", 
+    interacting_drug_count == 1 ~ "1", 
+    interacting_drug_count == 2 ~ "2", 
+    interacting_drug_count >= 3 ~ "3+", 
+  ))
+  
+
+# create event data
+event_data <- interacting_med_database |> 
+  select(ENROLID, first_post_index_event_during_follow_up) |> 
+  mutate(event = if_else(is.na(first_post_index_event_during_follow_up), 0, 1)) |> 
+  filter(event == 1) |> 
+  distinct()
+
+bbb <- b |> 
+  left_join(event_data, by = c("ENROLID" = "ENROLID", "day" = "first_post_index_event_during_follow_up")) |> 
+  mutate(event = if_else(is.na(event), 0, 1)) |> 
+  mutate(time = as.numeric(day - index_date))
+  
+# Add in relevant covariates - will just do sex for now for ease
+covariate_data <- interacting_med_database |> 
+  select(ENROLID, SEX) |> 
+  distinct()
+
+bbb_cov <- bbb |> 
+  left_join(covariate_data, by = "ENROLID")
+
+```
+
+# Marginal Structural Model
+```{r}
+library(survey)
+library(nnet)
+
+# Fit propensity score model for exposure
+# ipw_model <- glm(Exposure_Level ~ baseline_covariates + time_varying_covariates, 
+#                  data = data, family = "multinomial")
+
+# Fit multinomial logistic regression
+ipw_model <- multinom(Exposure_Level ~ SEX, data = bbb_cov)
+
+# Compute propensity scores
+propensity_scores <- predict(ipw_model, type = "probs")
+
+# add propensity score as column to dataset
+bbb_cov <- cbind(bbb_cov, propensity_scores)
+colnames(bbb_cov)[(ncol(bbb_cov) - ncol(propensity_scores) + 1):ncol(bbb_cov)] <- 
+  paste0("ps_", colnames(propensity_scores))
+
+# Calculate marginal probabilities
+marginal_probs <- bbb_cov |> 
+  group_by(Exposure_Level) |> 
+  summarise(marginal_prob = n() / nrow(bbb_cov)) |> 
+  ungroup()
+
+#Calculate stabilized weights
+# Map the observed probability for the observed exposure llevel
+bbb_cov <- bbb_cov |> 
+  left_join(marginal_probs, by = "Exposure_Level") |> 
+  mutate(
+    observed_prob = case_when(
+      Exposure_Level == "0" ~ ps_0,
+      Exposure_Level == "1" ~ ps_1,
+      Exposure_Level == "2" ~ ps_2,
+      Exposure_Level == "3+" ~ `ps_3+`
+    ),
+    stabilized_weight = marginal_prob / observed_prob
+  )
+
+library(survival)
+
+bbb_cov |> write_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/analytic_trial.parquet")
+
+bbb_cov <-  read_parquet("C:/Users/kahanso2/Documents/doac-ddi/scary aim/data/analytic_trial.parquet")
+
+# Weighted Cox model
+msm_model <- coxph(Surv(time, event) ~ Exposure_Level, 
+                   data = bbb_cov, weights = stabilized_weight)
+summary(msm_model)
+
+# Check proportional hazards
+cox.zph(msm_model)
+
+plot(cox.zph(msm_model))
+```
+
+# Plot
+```{r}
+# Convert Exposure_Level to factor if not already
+bbb_cov$Exposure_Level <- as.factor(bbb_cov$Exposure_Level)
+
+km_fit <- survfit(Surv(time, event) ~ Exposure_Level, data = bbb_cov, weights = stabilized_weight)
+
+# Plot using base R
+plot(km_fit, col = c("red", "blue", "green", "purple"), lty = 1, lwd = 2,
+     xlab = "Time (days)", ylab = "Survival Probability",
+     main = "Survival Curves by Exposure Level")
+legend("bottomleft", legend = levels(bbb_cov$Exposure_Level), 
+       col = c("red", "blue", "green", "purple"), lty = 1, lwd = 2)
+
+
+# Extract HRs and 95% CIs
+hr_table <- summary(msm_model)$coefficients
+ci_table <- summary(msm_model)$conf.int
+
+hr_data <- data.frame(
+  Exposure_Level = rownames(hr_table),
+  HR = ci_table[, "exp(coef)"],
+  Lower = ci_table[, "lower .95"],
+  Upper = ci_table[, "upper .95"]
+)
+
+# Plot using ggplot2
+ggplot(hr_data, aes(x = Exposure_Level, y = HR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    title = "Hazard Ratios by Exposure Level",
+    x = "Exposure Level",
+    y = "Hazard Ratio (HR)"
+  ) +
+  theme_minimal()
+
+
+plot(km_fit, fun = "cumhaz", col = c("red", "blue", "green", "purple"),
+     xlab = "Time (days)", ylab = "Cumulative Hazard",
+     main = "Cumulative Hazard by Exposure Level")
+legend("bottomright", legend = levels(bbb_cov$Exposure_Level), 
+       col = c("red", "blue", "green", "purple"), lty = 1, lwd = 2)
+```
+
+
+# Revisit if needed
+```{r}
+
+dabigatran_cohort_index |> 
+  filter(str_detect(GENNME, "Abciximab"))
+# Load in drug history for 6 months pre-index for these patients
+
+
+
+
+cohort_drugs <- all_drug_full |> 
+  arrange(GENNME)|> 
+  distinct(GENNME, MASTFRM, THRDTDS, MSTFMDS, ROADS, DEACLDS) |> 
+  mutate(GENNME = trimws(GENNME))
+
+cohort_drugs_filt_test <- cohort_drugs |> 
+  filter(ROADS != "Route Not Applicable") |>  #5090
+  filter(DEACLDS != "OTC") |>  #4088
+  filter(!(ROADS == "Topical application" & !str_detect(GENNME, regex("Piroxicam|Ibuprofen|Diclofenac|Flurbiprofen|Miconazole|Nifedipine", ignore_case = TRUE)))) |>  #3638
+  filter(!(ROADS == "Opthalmic" & !str_detect(GENNME, regex("Diclofenac|Flurbiprofen|Ketorolac", ignore_case = TRUE)))) |>
+  filter((ROADS == "Topical application" & !str_detect(GENNME, regex("Nifedipine", ignore_case = TRUE)))) |>
+  filter(!ROADS %in% c("Multiple Routes", "Otic", "Urinary bladder", "Vaginal", "Intraocular", "Urethral", "Intracavernosal", "Intradermal", "Irrigation", "Intrauterine", "Gingival", "Dental")) |>  #3498
+  distinct(GENNME, ROADS) #2626
+
+#Nasal - keep ketorolac; Inhalation - keep levofloxacin?
+
+
+
+cohort_drugs_vector <- unique(cohort_drugs$GENNME)
+
+potential_oac_ddi_TEST <- read_excel("C:/Users/kahanso2/Desktop/oac_ddi_lexicomp.xlsx", sheet = "combined_dd_list") |> 
+  clean_names()
+
+dabigatran_ddi <- potential_oac_ddi_TEST |> 
+  filter(dabigatran == 1) |> 
+  distinct()
+
+potential_oac_ddi <- read_excel("C:/Users/kahanso2/Desktop/oac_ddi_lexicomp.xlsx", sheet = "all_potential_added_combo") |> 
+  mutate(new_name = trimws(new_name))
+
+oac_ddi_list <- potential_oac_ddi |> 
+  mutate(test = if_else(new_name %in% cohort_drugs_vector, 1, 0)) |> 
+  select(new_name, test)
+  
+
+interacting_drugs_vector <- unique(potential_oac_ddi$new_name)
+
+cohort_drugs_2 <- cohort_drugs |> 
+  mutate(interacting_med = if_else(GENNME %in% interacting_drugs_vector, 1, 0)) |> 
+  select(GENNME, interacting_med, ROADS) |> 
+  filter(interacting_med == 1) |> 
+  distinct(GENNME, ROADS) 
+
+# Add row numbers to make each route unique for each GENNME
+cohort_drugs_3 <- cohort_drugs_2 %>%
+  group_by(GENNME) %>%
+  mutate(road_num = row_number()) %>%
+  ungroup() |> 
+  pivot_wider(names_from = road_num, values_from = ROADS, names_prefix = "ROADS_")
+
+# Filter out the oral only and injectable only
+cohort_drugs_4 <- cohort_drugs_3 |> 
+  filter(!((ROADS_1 == "Oral" | ROADS_1 == "Intravenous" | ROADS_1 == "Injection" | ROADS_1 == "Subcutaneous") & if_all(ROADS_2:ROADS_6, is.na))) |> 
+  filter(!if_all(ROADS_1:ROADS_6, ~ . %in% c("Injection", "Intravenous", "Subcutaneous", "Oral", "Transdermal", "Intramuscular", "Oromucosal") | is.na(.)))
+
+interacting_drugs
+
+
+cohort_drugs |> 
+  arrange(MASTFRM) |> 
+  distinct(MASTFRM)
+# Define the lookback period
+lookback_days <- 60
+
+dabigatran_cohort_2 <- dabigatran_cohort |> 
+  arrange(ENROLID, SVCDATE) |> 
+  distinct(ENROLID, .keep_all = TRUE) |> 
+  select(ENROLID, index_date, age_at_index, index_med) |> 
+  left_join(all_drug_full, by = "ENROLID") |> 
+  mutate(drug_end_date = round((SVCDATE + DAYSUPP) + (DAYSUPP * 0.2)) ) |> # Should adherence thing be applied here? 
+  mutate(
+    exposure_flag = if_else(
+      DAYSUPP > 0 & (
+      (SVCDATE >= index_date - lookback_days & SVCDATE <= index_date) | #Start date within 60 days before index
+        (drug_end_date >= index_date - lookback_days & drug_end_date <= index_date)), TRUE, FALSE)) |> 
+  arrange(ENROLID, SVCDATE) |> 
+  filter(!(SVCDATE == index_date & GENNME %in% c("Rivaroxaban", "Warfarin Sodium", "Apixaban", "Edoxaban"))) |> 
+  filter(exposure_flag == TRUE)
+  
+# Read in excel document with lexicomp DDI
+dabigatran_ddi <- read_excel("C:/Users/kahanso2/Documents/doac-ddi/scary aim/resources/oac_ddi_lexicomp.xlsx", sheet = "dabigatran_ddi")
+
+
+dabigatran_cohort_3 <- dabigatran_cohort_2 |> 
+  mutate(
+    interacting_flag = if_else(
+      str_detect(GENNME, paste(dabigatran_ddi$`Proper Name`, collapse = "|")), 
+      TRUE, 
+      FALSE
+    )
+  ) |> 
+  # Keep only FALSE and use distinct so can drive down further to see if mistakes
+  filter(interacting_flag == FALSE) |> 
+  distinct(GENNME)
+  
+    
+write.xlsx(dabigatran_cohort_3, file = "redbook_drug_names.xlsx", sheetName = "drug_names", append = FALSE)
+
+
+systemic_routes <- c(CAP,ELI,LIQ,POW,SGL,SOL,SUP,SUS,SYR,TAB, KIT)
+non_systemic_routes <- c(POW)
+
+```
+
+
+Given each oral anticoagulant has a unique drug-drug interaction profile, the analysis will be constructed to only flag potential interacting medications with the specific index medication. For example, warfarin plus omeprazole would be considered a potential interaction, while dabigatran plus omeprazole would not be. Data permitting, we will analyze the outcomes separately for each oral anticoagulant. A graphical display of the overall study design is presented in Figure 9. 
+
+# Exposure Measurement & Definitions
+
+Pharmacy dispensing data will be used to document oral anticoagulant treatment initiation, subsequent switching of agents, treatment discontinuation, number of days supplied, and concomitant medications at baseline and during follow-up. Medications with days' supply overlapping the oral anticoagulant exposure period will be considered concomitant use. 
+
+We will use Lexicomp drug-drug interaction software and interaction severity rankings to generate separate lists of potential DDI for each oral anticoagulant. Potential drug-drug interactions with category C (monitor therapy), D (consider therapy modification), or X (avoid combination) classifications in Lexicomp will be evaluated. In the analysis, we will also evaluate for the presence of multiple concomitant interactions and will report the person-time co-exposed to 1, 2, and 3+ potential drug-drug interactions.
+
+```{r}
+
+```
+
+
 
 
 # Statistical Analysis

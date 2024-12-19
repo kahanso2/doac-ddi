@@ -65,7 +65,7 @@ remove_sequential_pairs <- function(data) {
     filter(is.na(to_remove) | to_remove == FALSE) |>  # Filter out the marked rows and also their corresponding canceling negative rows
     select(-next_svdate, -next_daysupp, -days_diff, -to_remove) %>%
     ungroup() |> 
-    filter(DAYSUPP > 0) # Remove remainder of negative claims as probably errant or without positive match
+    filter(DAYSUPP >= 0) # Remove remainder of negative claims as probably errant or without positive match
   
 }
 
@@ -86,7 +86,7 @@ select_max_fill <- function(data) {
 calculate_drug_end_plus_grace <- function(data, adherence_multiplier) {
   data |> 
     arrange(ENROLID, SVCDATE) |> 
-    mutate(drug_end_plus_grace = round((SVCDATE + DAYSUPP) + (DAYSUPP * adherence_multiplier)))
+    mutate(drug_end_plus_grace = round((SVCDATE + DAYSUPP) + (DAYSUPP * adherence_multiplier + 1)))
 }
 
 
